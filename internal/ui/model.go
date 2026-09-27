@@ -171,6 +171,13 @@ type (
 		path string
 		err  error
 	}
+	// rawHeadersMsg carries the header block fetched for <space>h / <space>u.
+	// action is "show" (toggle the header view) or "unsubscribe".
+	rawHeadersMsg struct {
+		headers string
+		action  string
+		err     error
+	}
 	editorDoneMsg struct {
 		to, cc, bcc, from, subject, body string
 		err                              error
@@ -568,6 +575,8 @@ type Model struct {
 	openLinks       []emailLink       // extracted links from the email body
 	openSpyPixels   imap.SpyPixelInfo // spy pixels detected in the currently open email
 	readerPending   string            // chord prefix in reader (space for link open)
+	openRawHeaders  string            // raw RFC 5322 header block, fetched lazily by <space>h / <space>u
+	headersMode     int               // reader viewport: 0 body, 1 curated headers, 2 full raw headers
 	// Mark-as-read timer tracking
 	markAsReadUID    uint32 // UID of email with pending mark-as-read timer
 	markAsReadFolder string // folder of email with pending mark-as-read timer
@@ -2353,6 +2362,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.openWebURL = msg.webURL
 		m.openAttachments = msg.attachments
 		m.openSpyPixels = msg.spyPixels
+		m.openRawHeaders = ""
+		m.headersMode = 0
 		// Track spy pixel presence for inbox indicator
 		if msg.email != nil {
 			key := spyPixelKey(msg.email.Folder, msg.email.UID)
@@ -2489,6 +2500,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isError = false
 		}
 		return m, nil
+
+	case rawHeadersMsg:
+		if msg.err != nil {
+			m.status = "Fetch headers failed: " + msg.err.Error()
+			m.isError = true
+			return m, nil
+		}
+		m.openRawHeaders = msg.headers
+		if msg.action == "unsubscribe" {
+			return m.unsubscribe()
+		}
+		return m.toggleHeadersView(), nil
 
 	case rsvpDoneMsg:
 		if msg.err != nil {
@@ -4088,6 +4111,24 @@ func (m Model) updateReader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.isError = false
 				return m, m.downloadEMLCmd()
 			}
+			// space + h = toggle raw header block (mutt-style)
+			if key == "h" {
+				if m.openRawHeaders != "" {
+					return m.toggleHeadersView(), nil
+				}
+				m.status = "Fetching headers…"
+				m.isError = false
+				return m, m.fetchRawHeadersCmd("show")
+			}
+			// space + u = unsubscribe via List-Unsubscribe header or footer link
+			if key == "u" {
+				if m.openRawHeaders != "" {
+					return m.unsubscribe()
+				}
+				m.status = "Looking for unsubscribe link…"
+				m.isError = false
+				return m, m.fetchRawHeadersCmd("unsubscribe")
+			}
 			// space + v = leader for calendar RSVP chord (v + a/d/t/o)
 			if key == "v" {
 				if m.calendarInvite() == nil {
@@ -4272,7 +4313,7 @@ func (m Model) updateReader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else if len(m.openLinks) > 0 {
 			hints = append(hints, "1-0 links")
 		}
-		hints = append(hints, "d download .eml", "n add sender to notify.txt", "N add @domain to notify.txt")
+		hints = append(hints, "h headers", "u unsubscribe", "d download .eml", "n add sender to notify.txt", "N add @domain to notify.txt")
 		m.status = "space: " + strings.Join(hints, "  ·  ")
 		return m, nil
 	case "g":
@@ -4544,6 +4585,83 @@ func (m Model) downloadOpenAttachmentCmd(a imap.Attachment) tea.Cmd {
 		_ = exec.Command("xdg-open", dst).Start()
 		return attachOpenDoneMsg{path: dst}
 	}
+}
+
+// fetchRawHeadersCmd fetches the raw MIME source (same FETCH as the .eml
+// download) and returns only its header block; action is passed through to
+// rawHeadersMsg so the handler knows whether to show or unsubscribe.
+func (m Model) fetchRawHeadersCmd(action string) tea.Cmd {
+	e := m.openEmail
+	if e == nil {
+		return nil
+	}
+	cli := m.imapCli()
+	folder := e.Folder
+	uid := e.UID
+	return func() tea.Msg {
+		raw, err := cli.FetchRaw(nil, folder, uid)
+		if err != nil {
+			return rawHeadersMsg{err: err, action: action}
+		}
+		return rawHeadersMsg{headers: headerBlock(raw), action: action}
+	}
+}
+
+// toggleHeadersView cycles the reader viewport: rendered body → curated
+// headers (mutt's weed list) → full raw header block → body again. Requires
+// openRawHeaders to be populated.
+func (m Model) toggleHeadersView() Model {
+	m.headersMode = (m.headersMode + 1) % 3
+	m.isError = false
+	switch m.headersMode {
+	case 1:
+		m.reader.SetContent(lipgloss.NewStyle().Width(m.width).Render(weedHeaders(m.openRawHeaders)))
+		m.status = "key headers  ·  <space>h for all headers"
+	case 2:
+		m.reader.SetContent(lipgloss.NewStyle().Width(m.width).Render(m.openRawHeaders))
+		m.status = "all headers  ·  <space>h to return to the email"
+	default:
+		_ = loadEmailIntoReader(&m.reader, m.openEmail, m.openBody, m.openAttachments, m.openSpyPixels, m.openLinks, glamourStyleFor(m.cfg.UI.Theme), m.width)
+		m.status = ""
+	}
+	m.reader.GotoTop()
+	return m
+}
+
+// unsubscribe resolves the open email's unsubscribe target, first hit wins:
+// List-Unsubscribe https entry → $BROWSER; List-Unsubscribe mailto entry →
+// prefilled compose; otherwise the first body link mentioning "unsubscribe".
+// Requires openRawHeaders to be populated.
+func (m Model) unsubscribe() (tea.Model, tea.Cmd) {
+	https, mailto := parseListUnsubscribe(headerValue(m.openRawHeaders, "List-Unsubscribe"))
+	if https != "" {
+		m.status = "unsubscribe: opened " + https
+		m.isError = false
+		return m, m.openLinkCmd(https)
+	}
+	if mailto != "" {
+		to, subject := parseMailto(mailto)
+		if to != "" {
+			// Same prefill as the contacts picker / mailto compose.
+			m.attachments = nil
+			m.compose.reset()
+			m.presendFromI = m.defaultFromIndex()
+			m.compose.to.SetValue(to)
+			m.compose.subject.SetValue(subject)
+			m.state = stateCompose
+			m.status = "unsubscribe: compose to " + to
+			m.isError = false
+			return m, nil
+		}
+	}
+	if u := findUnsubscribeLink(m.openLinks); u != "" {
+		m.status = "unsubscribe: opened footer link " + u
+		m.isError = false
+		return m, m.openLinkCmd(u)
+	}
+	m.status = "No unsubscribe link found (no List-Unsubscribe header, no matching body link)."
+	m.isError = true
+	return m, nil
 }
 
 // downloadEMLCmd fetches the raw MIME source and saves it as .eml to ~/Downloads.
@@ -4919,11 +5037,7 @@ func (m Model) continueDraft() (tea.Model, tea.Cmd) {
 	f.WriteString(prelude + body) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	m.state = stateCompose
 	m.status = ""
@@ -5489,12 +5603,7 @@ func (m Model) launchEditorCmd() (tea.Model, tea.Cmd) {
 	f.WriteString(prelude) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)
@@ -5547,12 +5656,7 @@ func (m Model) launchEditorWithBodyCmd(to, cc, bcc, subject, body string) (tea.M
 	f.WriteString(content) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)
@@ -5670,12 +5774,7 @@ func (m Model) launchForwardCmd() (tea.Model, tea.Cmd) {
 	f.WriteString(prelude) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)
@@ -5750,12 +5849,7 @@ func (m Model) launchReplyWithCC(extraCC string, replyAll bool) (tea.Model, tea.
 	f.WriteString(prelude) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)

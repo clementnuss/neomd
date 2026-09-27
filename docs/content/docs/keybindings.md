@@ -102,6 +102,8 @@ To update both the help overlay and this document at once, edit that file and ru
 | `<space>/` | IMAP search ALL emails on server (From + Subject) |
 | `<space>c` | contacts picker — browse harvested + [contacts] file names; / filter, y copy address, Y copy "Name <addr>", enter compose to contact |
 | `<space>S` | scan current folder for spy pixels (skips already scanned) |
+| `<space>h  (reader)` | show key mail headers (From, Reply-To, List-Id, List-Unsubscribe, Return-Path, spam verdicts, …) — press again for all headers, again to return to the email |
+| `<space>u  (reader)` | unsubscribe — List-Unsubscribe https link opens in $BROWSER, mailto: prefills a compose, else first body link mentioning "unsubscribe" |
 | `<space>d  (reader)` | download raw email source (.eml) to ~/Downloads |
 | `<space>n  (reader)` | append open email's sender to notify.txt (desktop notifications opt-in) |
 | `<space>N  (reader)` | append @domain of open email's sender to notify.txt |

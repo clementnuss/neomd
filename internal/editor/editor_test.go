@@ -293,3 +293,40 @@ func TestPreludeParseHeadersRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestCommand_SplitsEditorArguments(t *testing.T) {
+	t.Setenv("EDITOR", "nvim --clean")
+	cmd := Command("/tmp/x.md")
+	want := []string{"nvim", "--clean", "/tmp/x.md"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("Args = %q, want %q", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("Args[%d] = %q, want %q", i, cmd.Args[i], want[i])
+		}
+	}
+}
+
+func TestCommand_DefaultsToNvim(t *testing.T) {
+	t.Setenv("EDITOR", "")
+	cmd := Command("-R", "/tmp/x.md")
+	if len(cmd.Args) != 3 || cmd.Args[0] != "nvim" || cmd.Args[1] != "-R" || cmd.Args[2] != "/tmp/x.md" {
+		t.Errorf("Args = %q", cmd.Args)
+	}
+}
+
+func TestCommand_QuotedEditorGoesThroughShell(t *testing.T) {
+	// Quotes and other shell syntax cannot be split by hand; defer to sh like git.
+	t.Setenv("EDITOR", `nvim -u "my conf.lua"`)
+	cmd := Command("/tmp/x.md")
+	want := []string{"sh", "-c", `nvim -u "my conf.lua" "$@"`, "editor", "/tmp/x.md"}
+	if len(cmd.Args) != len(want) {
+		t.Fatalf("Args = %q, want %q", cmd.Args, want)
+	}
+	for i := range want {
+		if cmd.Args[i] != want[i] {
+			t.Errorf("Args[%d] = %q, want %q", i, cmd.Args[i], want[i])
+		}
+	}
+}

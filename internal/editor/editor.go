@@ -11,6 +11,30 @@ import (
 	"strings"
 )
 
+// Command builds the $EDITOR invocation for args (usually the temp file).
+// $EDITOR may carry arguments — Omarchy ships EDITOR="omarchy-launch-editor
+// --inline", others use "code --wait" or "nvim -u ~/mail.lua" — so the value
+// is split on whitespace. Values containing shell syntax (quotes, $, …) are
+// handed to sh -c with the args appended, the way git runs GIT_EDITOR.
+// Empty $EDITOR falls back to nvim. Stdio is wired to the terminal.
+func Command(args ...string) *exec.Cmd {
+	ed := strings.TrimSpace(os.Getenv("EDITOR"))
+	if ed == "" {
+		ed = "nvim"
+	}
+	var cmd *exec.Cmd
+	if strings.ContainsAny(ed, "\"'\\$`|&;<>()*?[]#~") {
+		cmd = exec.Command("sh", append([]string{"-c", ed + ` "$@"`, "editor"}, args...)...)
+	} else {
+		fields := strings.Fields(ed)
+		cmd = exec.Command(fields[0], append(fields[1:], args...)...)
+	}
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd
+}
+
 // tempDir returns /tmp/neomd/, creating it if needed.
 func tempDir() string {
 	dir := filepath.Join(os.TempDir(), "neomd")
@@ -38,15 +62,7 @@ func Compose(prelude string) (string, error) {
 	}
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd := Command(tmpPath)
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("editor exited: %w", err)
 	}
@@ -74,14 +90,7 @@ func View(content string) (*exec.Cmd, string, error) {
 	}
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-	cmd := exec.Command(editorBin, "-R", tmpPath)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd := Command("-R", tmpPath)
 	return cmd, tmpPath, nil
 }
 
