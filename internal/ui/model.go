@@ -5037,11 +5037,7 @@ func (m Model) continueDraft() (tea.Model, tea.Cmd) {
 	f.WriteString(prelude + body) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	m.state = stateCompose
 	m.status = ""
@@ -5607,12 +5603,7 @@ func (m Model) launchEditorCmd() (tea.Model, tea.Cmd) {
 	f.WriteString(prelude) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)
@@ -5665,12 +5656,7 @@ func (m Model) launchEditorWithBodyCmd(to, cc, bcc, subject, body string) (tea.M
 	f.WriteString(content) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)
@@ -5788,12 +5774,7 @@ func (m Model) launchForwardCmd() (tea.Model, tea.Cmd) {
 	f.WriteString(prelude) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)
@@ -5868,12 +5849,7 @@ func (m Model) launchReplyWithCC(extraCC string, replyAll bool) (tea.Model, tea.
 	f.WriteString(prelude) //nolint
 	f.Close()
 
-	editorBin := os.Getenv("EDITOR")
-	if editorBin == "" {
-		editorBin = "nvim"
-	}
-
-	cmd := exec.Command(editorBin, tmpPath)
+	cmd := editor.Command(tmpPath)
 	draftBackups := m.cfg.UI.DraftBackups()
 	return m, tea.ExecProcess(cmd, func(execErr error) tea.Msg {
 		backupDraft(tmpPath, draftBackups)

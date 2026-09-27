@@ -169,6 +169,12 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 
 ## Compose → Pre-send → Send Pipeline
 
+- **`$EDITOR` is launched only via `editor.Command(args...)`** (`internal/editor/editor.go`) —
+  never `exec.Command(os.Getenv("EDITOR"), …)`. The value may carry arguments
+  (Omarchy: `omarchy-launch-editor --inline`; `code --wait`; `nvim -u ~/mail.lua`): it is
+  whitespace-split, or run through `sh -c '… "$@"'` when it contains shell syntax; empty →
+  `nvim`. Compose, reply, reply-all, forward, continue-draft and read-only view all use it.
+  Tests: `TestCommand_SplitsEditorArguments`, `TestCommand_QuotedEditorGoesThroughShell`.
 - **Pre-send round-trip preservation** — every path that re-opens the editor or returns to
   pre-send (`e`, `s`, `i`, `ctrl+b`, draft continue, `:recover`) must preserve: body,
   attachments (re-injected as `# [attach]` lines — editor body is source of truth),
