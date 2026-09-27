@@ -390,6 +390,17 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   `TestIntegration_BrowserSanitization`.
 - **Link opening whitelist** — only `http://`, `https://`, `mailto:` schemes. Test:
   `TestURLSchemeValidation`.
+- **Raw headers & unsubscribe (`<space>h` / `<space>u`)** — both chords fetch the message
+  once via `FetchRaw` (same FETCH as `.eml` download) and cache the header block in
+  `Model.openRawHeaders`; it is reset on every `bodyLoadedMsg`. `<space>h` cycles the
+  viewport body → curated headers (`weedHeaders`: `weedOrder` list + every `List-*` /
+  `X-Spam*`) → full raw block → body (`toggleHeadersView`, `Model.headersMode`).
+  `<space>u` resolution order is fixed: `List-Unsubscribe` **https** entry → `openLinkCmd`;
+  `List-Unsubscribe` **mailto** entry → prefilled compose (subject from `?subject=`, default
+  `unsubscribe`); else first body link whose text/URL contains `unsubscribe`; plain `http`
+  entries are ignored. Helpers in `internal/ui/unsubscribe.go`. Tests: `TestHeaderBlock*`,
+  `TestHeaderValue*`, `TestWeedHeaders*`, `TestParseListUnsubscribe*`, `TestParseMailto*`,
+  `TestFindUnsubscribeLink*`.
 - **Attachment open safety** — executable extensions are saved but never auto-opened;
   magic-byte mismatch detection (`http.DetectContentType`) blocks disguised files;
   sender-supplied filenames are sanitized against path traversal (`..`, separators) in
