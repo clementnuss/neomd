@@ -3,6 +3,7 @@ package editor
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseHeaders(t *testing.T) {
@@ -185,6 +186,7 @@ func TestReplyPrelude(t *testing.T) {
 		"Re: Hello",
 		"",
 		"Bob Smith",
+		time.Time{},
 		"Line one\nLine two",
 	)
 
@@ -196,9 +198,31 @@ func TestReplyPrelude(t *testing.T) {
 		t.Errorf("missing quoted line two, got:\n%s", result)
 	}
 
-	// Attribution line includes original sender name.
+	// Attribution line includes original sender name; with a zero date it
+	// falls back to the plain "wrote:" form.
 	if !strings.Contains(result, "**Bob Smith** wrote:") {
 		t.Errorf("missing attribution line, got:\n%s", result)
+	}
+}
+
+func TestReplyPreludeIncludesDate(t *testing.T) {
+	date := time.Date(2026, time.September, 28, 13, 29, 0, 0, time.UTC)
+	result := ReplyPrelude("bob@x.com", "", "Re: Hello", "", "Bob Smith <bob@x.com>", date, "body")
+	want := "> **Bob Smith <bob@x.com>** wrote on 28 Sep 2026 at 13:29:"
+	if !strings.Contains(result, want) {
+		t.Errorf("missing dated attribution %q, got:\n%s", want, result)
+	}
+}
+
+func TestReactionBodyIncludesDate(t *testing.T) {
+	date := time.Date(2026, time.September, 28, 13, 29, 0, 0, time.UTC)
+	result := ReactionBody("👍", "Simon", "Bob Smith <bob@x.com>", date, "body")
+	want := "> **Bob Smith <bob@x.com>** wrote on 28 Sep 2026 at 13:29:"
+	if !strings.Contains(result, want) {
+		t.Errorf("missing dated attribution %q, got:\n%s", want, result)
+	}
+	if !strings.Contains(ReactionBody("👍", "Simon", "Bob", time.Time{}, "body"), "> **Bob** wrote:") {
+		t.Errorf("zero date should fall back to plain wrote:")
 	}
 }
 

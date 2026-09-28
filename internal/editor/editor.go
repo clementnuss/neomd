@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // Command builds the $EDITOR invocation for args (usually the temp file).
@@ -115,15 +116,21 @@ func Prelude(to, cc, bcc, from, subject, signature string) string {
 	return s
 }
 
-// ReplyPrelude builds a quote block for replies. cc and from may be empty.
-// buildQuotedReply builds the quoted "wrote:" section used in replies and reactions.
-func buildQuotedReply(originalFrom, originalBody string) string {
-	return fmt.Sprintf("---\n\n> **%s** wrote:\n>\n%s\n\n---\n\n",
-		originalFrom, quoteLines(originalBody))
+// buildQuotedReply builds the quoted "wrote:" section used in replies and
+// reactions. When originalDate is non-zero the attribution reads
+// "wrote on 28 Sep 2026 at 13:29:"; a zero date falls back to plain "wrote:".
+func buildQuotedReply(originalFrom string, originalDate time.Time, originalBody string) string {
+	wrote := "wrote:"
+	if !originalDate.IsZero() {
+		wrote = "wrote on " + originalDate.Format("2 Jan 2006 at 15:04") + ":"
+	}
+	return fmt.Sprintf("---\n\n> **%s** %s\n>\n%s\n\n---\n\n",
+		originalFrom, wrote, quoteLines(originalBody))
 }
 
-func ReplyPrelude(to, cc, subject, from, originalFrom, originalBody string) string {
-	return Prelude(to, cc, "", from, subject, "") + buildQuotedReply(originalFrom, originalBody)
+// ReplyPrelude builds a quote block for replies. cc and from may be empty.
+func ReplyPrelude(to, cc, subject, from, originalFrom string, originalDate time.Time, originalBody string) string {
+	return Prelude(to, cc, "", from, subject, "") + buildQuotedReply(originalFrom, originalDate, originalBody)
 }
 
 // ForwardPrelude builds a quoted forward block. The To field is left empty for
@@ -145,8 +152,8 @@ func ForwardPrelude(subject, from, originalFrom, originalDate, originalTo, origi
 // ReactionBody builds the markdown body for an emoji reaction.
 // Returns markdown that will be used for both text/plain and text/html parts (same as regular replies).
 // Includes the quoted original message using the same quoting logic as regular replies.
-func ReactionBody(emoji, fromName, originalFrom, originalBody string) string {
-	quoted := buildQuotedReply(originalFrom, originalBody)
+func ReactionBody(emoji, fromName, originalFrom string, originalDate time.Time, originalBody string) string {
+	quoted := buildQuotedReply(originalFrom, originalDate, originalBody)
 	return fmt.Sprintf("%s\n\n_%s reacted via [neomd](https://neomd.ssp.sh)_\n\n%s", emoji, fromName, quoted)
 }
 

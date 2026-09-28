@@ -103,6 +103,11 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 
 ## Reply & Threading
 
+- **Quote header carries the original date** — replies and emoji reactions quote the
+  original as `> **Name <addr>** wrote on 28 Sep 2026 at 13:29:` (local time, 24h,
+  `buildQuotedReply` in `internal/editor/editor.go`); a zero `Date` falls back to the
+  plain `wrote:` form. Forward keeps its own RFC-style `Date:` line. Tests:
+  `TestReplyPreludeIncludesDate`, `TestReactionBodyIncludesDate`.
 - **`·` reply indicator** — after sending a reply, the original email gets the IMAP
   `\Answered` flag (`MarkAnswered` in `internal/imap/client.go`, called from `sendEmailCmd`
   in `internal/ui/model.go`) and the inbox shows `·` (or `·╰` inside a thread,
