@@ -210,3 +210,34 @@ func TestMem_SearchUIDs_And_FetchHeadersByUID(t *testing.T) {
 		t.Errorf("FetchHeadersByUID = %+v", got)
 	}
 }
+
+func TestMem_FetchHeaders_MissingMailboxKeepsConnectionUsable(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMessage(t, user, "INBOX", "x", false)
+	if _, err := cli.FetchHeaders(context.Background(), "NoSuchBox", 10); err == nil {
+		t.Fatal("expected SELECT error for missing mailbox")
+	}
+	// The pipelined UID SEARCH response must have been drained: the very next
+	// call on the same connection works and selects the right mailbox.
+	got, err := cli.FetchHeaders(context.Background(), "INBOX", 10)
+	if err != nil || len(got) != 1 || got[0].Subject != "x" {
+		t.Errorf("after failed SELECT: got %+v, %v", got, err)
+	}
+	if cli.selectedMailbox != "INBOX" {
+		t.Errorf("selectedMailbox = %q, want INBOX", cli.selectedMailbox)
+	}
+}
+
+func TestMem_FetchHeaders_SecondCallSkipsSelect(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMessage(t, user, "INBOX", "x", false)
+	if _, err := cli.FetchHeaders(context.Background(), "INBOX", 10); err != nil {
+		t.Fatal(err)
+	}
+	// Selection is cached; a second call must not error and must still see new mail.
+	seedMessage(t, user, "INBOX", "y", false)
+	got, err := cli.FetchHeaders(context.Background(), "INBOX", 10)
+	if err != nil || fmt.Sprint(uidsOf(got)) != "[2 1]" {
+		t.Errorf("second call: %v, %v", uidsOf(got), err)
+	}
+}

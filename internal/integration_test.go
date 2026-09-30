@@ -1190,3 +1190,49 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// TestIntegration_PipelinedFetchMatchesSearch pins that the pipelined
+// SELECT‖UID SEARCH path in FetchHeaders returns exactly the newest-n UID set
+// a serial SearchUIDs + FetchHeadersByUID sees on a real server.
+func TestIntegration_PipelinedFetchMatchesSearch(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	ctx := context.Background()
+	fast, err := cli.FetchHeaders(ctx, "INBOX", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uids, err := cli.SearchUIDs(ctx, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) > 50 {
+		uids = uids[len(uids)-50:]
+	}
+	slow, err := cli.FetchHeadersByUID(ctx, "INBOX", uids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fast) != len(slow) {
+		t.Fatalf("pipelined %d emails, serial %d", len(fast), len(slow))
+	}
+	for i := range fast { // fast is newest-first, slow ascending
+		if fast[i].UID != slow[len(slow)-1-i].UID || fast[i].Subject != slow[len(slow)-1-i].Subject {
+			t.Errorf("row %d differs: %d/%q vs %d/%q", i, fast[i].UID, fast[i].Subject, slow[len(slow)-1-i].UID, slow[len(slow)-1-i].Subject)
+		}
+	}
+	counts, err := cli.FetchUnseenCounts(ctx, map[string]string{"Inbox": "INBOX", "PaperTrail": "PaperTrail", "Waiting": "Waiting", "Scheduled": "Scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unseen := 0
+	for _, e := range slow {
+		if !e.Seen {
+			unseen++
+		}
+	}
+	if len(uids) <= 50 && counts["Inbox"] != unseen {
+		t.Errorf("STATUS unseen %d != counted %d", counts["Inbox"], unseen)
+	}
+}
