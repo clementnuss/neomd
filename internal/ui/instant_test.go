@@ -400,3 +400,69 @@ func TestCache_GoSpamCommandResultIsShown(t *testing.T) {
 		t.Errorf("list = %v, want Spam [80]", got)
 	}
 }
+
+func TestCache_LateRefreshDoesNotOverwriteSearchView(t *testing.T) {
+	m := instantModel(t, 2)
+	ts := mkEmail(50, "<ts@x>", "queued", "New <n@example.com>", 0, false)
+	ts.Folder = "ToScreen"
+	m.folderCache = map[string]folderSnapshot{cacheKey("P", "ToScreen"): {emails: []imap.Email{ts}}}
+	res, _ := m.updateInbox(keyTab()) // cache hit: ToScreen shown with ↻, refresh in flight
+	mm := res.(Model)
+	// User opens an IMAP search before the refresh lands.
+	hit := mkEmail(90, "<hit@x>", "search hit", "X <x@example.com>", 0, false)
+	hit.Folder = "Archive"
+	mm.offTabFolder = "Search"
+	mm.imapSearchResults = true
+	mm.emails = []imap.Email{hit}
+	mm.applyFilter()
+	fresh := mkEmail(51, "<f@x>", "fresh", "New <n@example.com>", 0, false)
+	fresh.Folder = "ToScreen"
+	res, _ = mm.Update(emailsLoadedMsg{emails: []imap.Email{fresh}, folder: "ToScreen", account: "P"})
+	mm = res.(Model)
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 90 {
+		t.Errorf("search rows must remain, got %v", got)
+	}
+	if mm.offTabFolder != "Search" || !mm.imapSearchResults {
+		t.Errorf("search view must stay: offTab=%q results=%v", mm.offTabFolder, mm.imapSearchResults)
+	}
+	if snap, ok := mm.folderCache[cacheKey("P", "ToScreen")]; !ok || len(snap.emails) != 1 || snap.emails[0].UID != 51 {
+		t.Error("late refresh must still be cached under the tab folder")
+	}
+}
+
+func TestCache_BgInboxFetchKeyedByFetchedAccount(t *testing.T) {
+	m := instantModel(t, 1) // active account P
+	w := mkEmail(70, "<w@x>", "work", "X <x@example.com>", 0, false)
+	w.Folder = "INBOX"
+	res, _ := m.Update(bgInboxFetchedMsg{emails: []imap.Email{w}, account: "W"})
+	mm := res.(Model)
+	if _, ok := mm.folderCache[cacheKey("W", "INBOX")]; !ok {
+		t.Error("snapshot must land under the fetched account W")
+	}
+	if _, ok := mm.folderCache[cacheKey("P", "INBOX")]; ok {
+		t.Error("snapshot must not land under the active account P")
+	}
+}
+
+// R inside a synthetic view (Search) waits on the tab folder's fetch; the
+// dropped result must still end the spinner, or the list stays hidden.
+func TestCache_ReloadInSearchViewDoesNotHangSpinner(t *testing.T) {
+	m := instantModel(t, 1)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	hit := mkEmail(90, "<hit@x>", "search hit", "X <x@example.com>", 0, false)
+	hit.Folder = "Archive"
+	m.offTabFolder = "Search"
+	m.imapSearchResults = true
+	m.emails = []imap.Email{hit}
+	m.applyFilter()
+	res, _ := m.updateInbox(key("R"))
+	mm := res.(Model)
+	res, _ = mm.Update(emailsLoadedMsg{emails: mm.emails[:0], folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	if mm.loading || mm.refreshing {
+		t.Errorf("spinner/↻ must end when the awaited fetch lands: loading=%v refreshing=%v", mm.loading, mm.refreshing)
+	}
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 90 {
+		t.Errorf("search rows must remain, got %v", got)
+	}
+}

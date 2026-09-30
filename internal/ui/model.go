@@ -134,8 +134,11 @@ type (
 	errMsg struct{ err error }
 	// background sync (runs every bgSyncInterval while neomd is open)
 	bgSyncTickMsg     struct{}
-	bgInboxFetchedMsg struct{ emails []imap.Email }
-	bgScreenDoneMsg   struct{ moved, total int }
+	bgInboxFetchedMsg struct {
+		emails  []imap.Email
+		account string // account the fetch ran for (cache key)
+	}
+	bgScreenDoneMsg struct{ moved, total int }
 
 	// bgVipFolderFetchedMsg carries a non-Inbox folder fetch used purely to
 	// dispatch desktop notifications for VIP senders whose mail the daemon
@@ -2185,15 +2188,16 @@ func (m Model) scheduleMarkAsReadTimer(uid uint32, folder string) tea.Cmd {
 // bgFetchInboxCmd silently fetches inbox headers for background screening.
 // Errors are swallowed — a transient network hiccup shouldn't disrupt the UI.
 func (m Model) bgFetchInboxCmd() tea.Cmd {
+	account := m.activeAccountName()
 	return func() tea.Msg {
 		m.bgImapCli().ResetMailboxSelection() // force fresh SELECT to see new messages
 		emails, err := m.bgImapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, m.cfg.UI.InboxCount)
 		if err != nil {
 			// Return nil to let the next scheduled tick retry naturally.
 			// Returning bgSyncTickMsg{} here creates an infinite loop on persistent errors!
-			return bgInboxFetchedMsg{emails: nil} // signal completion even on error
+			return bgInboxFetchedMsg{emails: nil, account: account} // signal completion even on error
 		}
-		return bgInboxFetchedMsg{emails: emails}
+		return bgInboxFetchedMsg{emails: emails, account: account}
 	}
 }
 
@@ -2395,6 +2399,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Apply to the visible list only if the user is still on this folder
 		// of this account; a late result for another folder is cached only.
 		if msg.folder != m.activeFolder() || (msg.account != "" && msg.account != m.activeAccountName()) {
+			return m, nil
+		}
+		// Synthetic off-tab views (Search, Everything, Thread, Sender, Merged: …)
+		// map activeFolder() to the tab underneath; never overwrite their rows.
+		// End spinner/↻ though: R, undo and error reloads there wait on this.
+		if m.offTabFolder != "" && m.offTabFolder != "Spam" && m.offTabFolder != "Drafts" {
+			m.loading = false
+			m.refreshing = false
 			return m, nil
 		}
 		m.loading = false
@@ -3054,7 +3066,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.folderCache == nil {
 			m.folderCache = make(map[string]folderSnapshot)
 		}
-		m.folderCache[cacheKey(m.activeAccountName(), m.cfg.Folders.Inbox)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+		m.folderCache[cacheKey(msg.account, m.cfg.Folders.Inbox)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
 		if err := m.validateScreenerSafety(); err != nil {
 			m.status = err.Error()
 			m.isError = true
