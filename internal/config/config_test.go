@@ -665,3 +665,12 @@ func TestLoad_SetsMergesFileNextToConfig(t *testing.T) {
 		t.Errorf("MergesFile = %q, want %q", cfg.MergesFile, want)
 	}
 }
+
+func TestIMAPTracePath_NextToMovesLog(t *testing.T) {
+	if filepath.Dir(IMAPTracePath()) != filepath.Dir(AuditLogPath()) {
+		t.Errorf("IMAPTracePath() = %q, want same dir as AuditLogPath() %q", IMAPTracePath(), AuditLogPath())
+	}
+	if filepath.Base(IMAPTracePath()) != "imap-trace.log" {
+		t.Errorf("basename = %q, want imap-trace.log", filepath.Base(IMAPTracePath()))
+	}
+}

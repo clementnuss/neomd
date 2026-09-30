@@ -53,6 +53,9 @@ func main() {
 		os.Exit(1)
 	}
 	goIMAP.SetAuditLogPath(config.AuditLogPath()) // every MOVE/EXPUNGE → ~/.cache/neomd/moves.log
+	if os.Getenv("NEOMD_IMAP_TRACE") == "1" {
+		goIMAP.SetTracePath(config.IMAPTracePath()) // per-operation timings → ~/.cache/neomd/imap-trace.log
+	}
 
 	accounts := cfg.ActiveAccounts()
 	if len(accounts) == 0 {
