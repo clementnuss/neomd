@@ -241,3 +241,29 @@ func TestMem_FetchHeaders_SecondCallSkipsSelect(t *testing.T) {
 		t.Errorf("second call: %v, %v", uidsOf(got), err)
 	}
 }
+
+func TestMem_MoveMessage_KeepsSelectionAndBatchWorks(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	for i := 1; i <= 4; i++ {
+		seedMessage(t, user, "INBOX", "m"+strconv.Itoa(i), false)
+	}
+	if _, err := cli.FetchHeaders(context.Background(), "INBOX", 10); err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []uint32{2, 3, 4} {
+		if _, err := cli.MoveMessage(context.Background(), "INBOX", uid, "Trash"); err != nil {
+			t.Fatalf("move %d: %v", uid, err)
+		}
+		if cli.selectedMailbox != "INBOX" {
+			t.Fatalf("after MOVE selectedMailbox = %q, want INBOX (no forced re-SELECT)", cli.selectedMailbox)
+		}
+	}
+	src, _ := cli.FetchHeaders(context.Background(), "INBOX", 10)
+	if fmt.Sprint(uidsOf(src)) != "[1]" {
+		t.Errorf("INBOX after 3 moves = %v, want [1]", uidsOf(src))
+	}
+	dst, _ := cli.FetchHeaders(context.Background(), "Trash", 10)
+	if fmt.Sprint(uidsOf(dst)) != "[3 2 1]" {
+		t.Errorf("Trash after 3 moves = %v, want [3 2 1]", uidsOf(dst))
+	}
+}

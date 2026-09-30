@@ -1236,3 +1236,40 @@ func TestIntegration_PipelinedFetchMatchesSearch(t *testing.T) {
 		t.Errorf("STATUS unseen %d != counted %d", counts["Inbox"], unseen)
 	}
 }
+
+// TestIntegration_MoveWithoutReselect pins that a MOVE followed by a header
+// fetch on the same connection reflects the move on both sides without any
+// forced re-SELECT (MoveMessage no longer clears the selection cache).
+func TestIntegration_MoveWithoutReselect(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	testFolder := "NeomdTest"
+	if _, err := cli.EnsureFolders(context.Background(), []string{testFolder}); err != nil {
+		t.Fatalf("EnsureFolders: %v", err)
+	}
+	subject := uniqueSubject("move-noreselect")
+	if err := smtp.Send(env.smtpConfig(), env.user, "", "", subject, "moved without re-select", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	email := waitForEmail(t, cli, "INBOX", subject, 30*time.Second)
+	destUID, err := cli.MoveMessage(context.Background(), "INBOX", email.UID, testFolder)
+	if err != nil {
+		cleanupEmail(t, cli, "INBOX", email.UID)
+		t.Fatalf("MoveMessage: %v", err)
+	}
+	src, err := cli.FetchHeaders(context.Background(), "INBOX", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range src {
+		if e.UID == email.UID {
+			t.Errorf("uid %d still listed in INBOX after MOVE", email.UID)
+		}
+	}
+	moved := waitForEmail(t, cli, testFolder, subject, 10*time.Second)
+	if destUID != 0 && moved.UID != destUID {
+		t.Errorf("dest UID %d != COPYUID %d", moved.UID, destUID)
+	}
+	cleanupEmail(t, cli, testFolder, moved.UID)
+}

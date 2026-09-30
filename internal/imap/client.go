@@ -1176,7 +1176,10 @@ func (c *Client) MoveMessage(ctx context.Context, src string, uid uint32, dst st
 				}
 			}
 		}
-		c.selectedMailbox = ""
+		// The source mailbox stays selected after MOVE (RFC 9051 §6.4.8); the
+		// server's untagged EXPUNGE responses are consumed by go-imap and every
+		// later operation is UID-addressed, so no re-SELECT is needed. Clearing
+		// the cache here cost one extra round trip per MOVE.
 		audit("MOVE %s uid=%d -> %s destUID=%d", src, uid, dst, destUID)
 		return nil
 	})
