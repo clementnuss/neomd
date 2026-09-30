@@ -53,8 +53,9 @@ const (
 // async message types
 type (
 	emailsLoadedMsg struct {
-		emails []imap.Email
-		folder string
+		emails  []imap.Email
+		folder  string
+		account string // account the fetch ran for; "" = active account
 	}
 	bodyLoadedMsg struct {
 		email       *imap.Email
@@ -530,6 +531,14 @@ type autoScreenMove struct {
 	dst   string
 }
 
+// folderSnapshot is the last header list fetched for one account+folder.
+type folderSnapshot struct {
+	emails    []imap.Email
+	fetchedAt time.Time
+}
+
+func cacheKey(account, folder string) string { return account + "\x00" + folder }
+
 // pendingDomainAction queues a domain-level screener mutation awaiting y/n.
 // entry is the storage form ("@ssp.sh"); action is "I" (approve) or "O" (block).
 type pendingDomainAction struct {
@@ -566,6 +575,9 @@ type Model struct {
 	inbox   list.Model
 	emails  []imap.Email
 	spinner spinner.Model
+
+	folderCache map[string]folderSnapshot // last-seen list per account+folder; shown at once on switch with ↻ while re-fetching
+	prefetched  bool                      // startup prefetch already scheduled
 
 	// Reader
 	reader          viewport.Model
@@ -811,6 +823,15 @@ func (m Model) activeAccount() config.AccountConfig {
 	return m.accounts[0]
 }
 
+// activeAccountName is activeAccount().Name, or "" when no account is
+// configured (folder cache key; "" in emailsLoadedMsg means "active").
+func (m Model) activeAccountName() string {
+	if len(m.accounts) == 0 {
+		return ""
+	}
+	return m.activeAccount().Name
+}
+
 // presendFroms returns all available From addresses: all accounts first (in
 // config order), then any [[senders]] aliases. This lets the user cycle to any
 // account's From address regardless of which account is currently active.
@@ -1035,12 +1056,13 @@ func (m Model) activeFolder() string {
 // ── Commands ─────────────────────────────────────────────────────────────
 
 func (m Model) fetchFolderCmd(folder string) tea.Cmd {
+	account := m.activeAccountName()
 	return func() tea.Msg {
 		emails, err := m.imapCli().FetchHeaders(nil, folder, m.cfg.UI.InboxCount)
 		if err != nil {
 			return errMsg{err}
 		}
-		return emailsLoadedMsg{emails: emails, folder: folder}
+		return emailsLoadedMsg{emails: emails, folder: folder, account: account}
 	}
 }
 
@@ -1586,6 +1608,16 @@ func (m *Model) removeFromList(targets []imap.Email) tea.Cmd {
 		}
 	}
 	m.emails = kept
+	if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), m.activeFolder())]; ok {
+		keptSnap := snap.emails[:0:0]
+		for _, e := range snap.emails {
+			if !gone[e.Folder+"\x00"+strconv.FormatUint(uint64(e.UID), 10)] {
+				keptSnap = append(keptSnap, e)
+			}
+		}
+		snap.emails = keptSnap
+		m.folderCache[cacheKey(m.activeAccountName(), m.activeFolder())] = snap
+	}
 	m.markedUIDs = make(map[uint32]bool)
 	cmd := m.sortEmails()
 	if prev != nil && !gone[key(*prev)] {
@@ -1625,6 +1657,25 @@ func (m Model) sameSenderIn(e imap.Email, folder string) []imap.Email {
 func (m *Model) refreshActiveFolderCmd() tea.Cmd {
 	m.refreshing = true
 	return m.fetchFolderCmd(m.activeFolder())
+}
+
+// loadActiveFolder is what every tab switch calls. With a cached snapshot
+// (and instant_folder_switch on) the list appears at once and the header
+// shows ↻ until the fresh fetch lands; otherwise the spinner path as before.
+func (m *Model) loadActiveFolder() tea.Cmd {
+	folder := m.activeFolder()
+	if m.cfg.UI.InstantSwitch() {
+		if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), folder)]; ok {
+			m.emails = snap.emails
+			m.markedUIDs = make(map[uint32]bool)
+			m.filterActive, m.filterText = false, ""
+			m.loading = false
+			listCmd := m.sortEmails()
+			return tea.Batch(listCmd, m.refreshActiveFolderCmd())
+		}
+	}
+	m.loading = true
+	return tea.Batch(m.spinner.Tick, m.fetchFolderCmd(folder))
 }
 
 // undoableMoves drops moves whose destination UID is unknown (the server sent
@@ -2310,8 +2361,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.activeFolderI = z.folderIndex
 					m.offTabFolder = ""
 					m.imapSearchText = ""
-					m.loading = true
-					return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+					return m, m.loadActiveFolder()
 				}
 			}
 		}
@@ -2338,6 +2388,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case emailsLoadedMsg:
+		if m.folderCache == nil {
+			m.folderCache = make(map[string]folderSnapshot)
+		}
+		m.folderCache[cacheKey(msg.account, msg.folder)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+		// Apply to the visible list only if the user is still on this folder
+		// of this account; a late result for another folder is cached only.
+		if msg.folder != m.activeFolder() || (msg.account != "" && msg.account != m.activeAccountName()) {
+			return m, nil
+		}
 		m.loading = false
 		m.refreshing = false
 		prevCursor := selectedEmail(m.inbox) // keep the cursor on the same email after reload
@@ -2992,6 +3051,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bgSyncInProgress = false
 			return m, nil
 		}
+		if m.folderCache == nil {
+			m.folderCache = make(map[string]folderSnapshot)
+		}
+		m.folderCache[cacheKey(m.activeAccountName(), m.cfg.Folders.Inbox)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
 		if err := m.validateScreenerSafety(); err != nil {
 			m.status = err.Error()
 			m.isError = true
@@ -3630,16 +3693,14 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.offTabFolder = ""
 		m.imapSearchResults = false
 		m.imapSearchText = ""
-		m.loading = true
-		return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+		return m, m.loadActiveFolder()
 
 	case "shift+tab", "H", "[":
 		m.activeFolderI = (m.activeFolderI - 1 + len(m.folders)) % len(m.folders)
 		m.offTabFolder = ""
 		m.imapSearchResults = false
 		m.imapSearchText = ""
-		m.loading = true
-		return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+		return m, m.loadActiveFolder()
 
 	case "G":
 		m.inbox.Select(len(m.inbox.Items()) - 1)
@@ -3697,8 +3758,7 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.activeFolderI = 0
-			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+			return m, m.loadActiveFolder()
 		}
 
 	case "c":
@@ -4057,8 +4117,7 @@ func (m Model) handleChord(prefix, key string) (tea.Model, tea.Cmd) {
 				}
 				m.activeFolderI = idx
 				m.offTabFolder = ""
-				m.loading = true
-				return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+				return m, m.loadActiveFolder()
 			}
 		}
 		if key != "esc" {
@@ -4112,8 +4171,7 @@ func (m Model) handleChord(prefix, key string) (tea.Model, tea.Cmd) {
 					m.activeFolderI = i
 					m.offTabFolder = ""
 					m.imapSearchText = ""
-					m.loading = true
-					return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+					return m, m.loadActiveFolder()
 				}
 			}
 		}

@@ -674,3 +674,15 @@ func TestIMAPTracePath_NextToMovesLog(t *testing.T) {
 		t.Errorf("basename = %q, want imap-trace.log", filepath.Base(IMAPTracePath()))
 	}
 }
+
+func TestUIConfig_InstantSwitchDefaultsTrue(t *testing.T) {
+	var u UIConfig
+	if !u.InstantSwitch() {
+		t.Error("default must be true")
+	}
+	f := false
+	u.InstantFolderSwitch = &f
+	if u.InstantSwitch() {
+		t.Error("explicit false must disable")
+	}
+}

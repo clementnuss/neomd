@@ -273,6 +273,7 @@ type UIConfig struct {
 	BulkProgressThreshold int             `toml:"bulk_progress_threshold"` // show progress counter for batches larger than this (default 10)
 	DraftBackupCount      int             `toml:"draft_backup_count"`      // rolling compose backups in ~/.cache/neomd/drafts/ (default 20, -1 = disabled)
 	MarkAsReadAfterSecs   int             `toml:"mark_as_read_after_secs"` // seconds in reader before marking as read (0 = immediate, default 7)
+	InstantFolderSwitch   *bool           `toml:"instant_folder_switch"`   // show the last-seen list at once and refresh behind it (default true)
 }
 
 // DraftBackups returns the max number of rolling draft backups (default 20, -1 = disabled).
@@ -289,6 +290,15 @@ func (u UIConfig) BulkThreshold() int {
 		return 10
 	}
 	return u.BulkProgressThreshold
+}
+
+// InstantSwitch reports whether folder switches show the cached list first
+// (default true). false restores the spinner-on-every-switch behavior.
+func (u UIConfig) InstantSwitch() bool {
+	if u.InstantFolderSwitch == nil {
+		return true
+	}
+	return *u.InstantFolderSwitch
 }
 
 // AutoScreen returns true if auto-screen-on-inbox-load is enabled (default: true).

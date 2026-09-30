@@ -253,3 +253,150 @@ func TestOptimistic_CursorLandsOnNextRowAfterSenderExpansionAbove(t *testing.T) 
 		t.Errorf("cursor must land on D (uid 2), got %+v", e)
 	}
 }
+
+func keyTab() tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyTab} }
+
+func TestCache_SwitchToCachedFolderIsInstant(t *testing.T) {
+	m := instantModel(t, 2)
+	ts := mkEmail(50, "<ts@x>", "queued", "New <n@example.com>", 0, false)
+	ts.Folder = "ToScreen"
+	m.folderCache = map[string]folderSnapshot{cacheKey("P", "ToScreen"): {emails: []imap.Email{ts}}}
+	res, cmd := m.updateInbox(keyTab()) // Inbox -> ToScreen
+	mm := res.(Model)
+	if mm.loading {
+		t.Error("cached folder must not show the spinner")
+	}
+	if !mm.refreshing || cmd == nil {
+		t.Error("cached folder must still refresh in the background")
+	}
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 50 {
+		t.Errorf("list = %v, want cached [50]", got)
+	}
+}
+
+func TestCache_SwitchToUncachedFolderShowsSpinner(t *testing.T) {
+	m := instantModel(t, 2)
+	res, cmd := m.updateInbox(keyTab())
+	mm := res.(Model)
+	if !mm.loading || cmd == nil {
+		t.Error("uncached folder keeps today's spinner path")
+	}
+}
+
+func TestCache_LoadedResultIsCachedAndShownOnlyForActiveFolder(t *testing.T) {
+	m := instantModel(t, 1)
+	other := mkEmail(60, "<o@x>", "late", "X <x@example.com>", 0, false)
+	other.Folder = "Archive"
+	res, _ := m.Update(emailsLoadedMsg{emails: []imap.Email{other}, folder: "Archive", account: "P"})
+	mm := res.(Model)
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 1 {
+		t.Errorf("late result for another folder must not replace the list, got %v", got)
+	}
+	if snap, ok := mm.folderCache[cacheKey("P", "Archive")]; !ok || len(snap.emails) != 1 {
+		t.Error("late result must still be cached")
+	}
+	mine := mkEmail(2, "<n@x>", "new", "X <x@example.com>", 0, false)
+	mine.Folder = "INBOX"
+	mm.refreshing = true
+	res, _ = mm.Update(emailsLoadedMsg{emails: []imap.Email{mine}, folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 2 || mm.refreshing {
+		t.Errorf("active folder result must be shown and clear ↻: list=%v refreshing=%v", got, mm.refreshing)
+	}
+}
+
+func TestCache_LateResultForOtherFolderIsCachedNotShown(t *testing.T) {
+	// Same guard, exercised through a real switch: user leaves INBOX before
+	// its fetch returns. The spinner path keeps the old rows behind the
+	// spinner (today's behavior); the late INBOX row must not be added.
+	m := instantModel(t, 1)
+	res, _ := m.updateInbox(keyTab()) // now ToScreen, loading
+	mm := res.(Model)
+	stale := mkEmail(9, "<s@x>", "stale", "X <x@example.com>", 0, false)
+	stale.Folder = "INBOX"
+	res, _ = mm.Update(emailsLoadedMsg{emails: []imap.Email{stale}, folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	if !mm.loading {
+		t.Error("ToScreen is still loading; an INBOX result must not end the spinner")
+	}
+	for _, uid := range uidsInList(mm) {
+		if uid == 9 {
+			t.Errorf("INBOX rows must not appear under the ToScreen tab: %v", uidsInList(mm))
+		}
+	}
+	if _, ok := mm.folderCache[cacheKey("P", "INBOX")]; !ok {
+		t.Error("late INBOX result must still be cached")
+	}
+}
+
+func TestCache_KeyedByAccount(t *testing.T) {
+	m := instantModel(t, 1)
+	m.cfg.Accounts = append(m.cfg.Accounts, config.AccountConfig{Name: "W", From: "w@x"})
+	m.accounts = m.cfg.ActiveAccounts()
+	m.clients = []*imap.Client{imap.New(imap.Config{}), imap.New(imap.Config{})}
+	foreign := mkEmail(70, "<w@x>", "work", "X <x@example.com>", 0, false)
+	foreign.Folder = "INBOX"
+	res, _ := m.Update(emailsLoadedMsg{emails: []imap.Email{foreign}, folder: "INBOX", account: "W"})
+	mm := res.(Model)
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 1 {
+		t.Errorf("account W's INBOX must not show under account P, got %v", got)
+	}
+	if _, ok := mm.folderCache[cacheKey("W", "INBOX")]; !ok {
+		t.Error("cached under account W")
+	}
+	if _, ok := mm.folderCache[cacheKey("P", "INBOX")]; ok {
+		t.Error("must not be cached under account P")
+	}
+}
+
+func TestCache_RefreshKeyBypassesCache(t *testing.T) {
+	m := instantModel(t, 1)
+	m.clients = []*imap.Client{imap.New(imap.Config{})} // R resets the mailbox selection on the client
+	m.folderCache = map[string]folderSnapshot{cacheKey("P", "INBOX"): {emails: m.emails}}
+	res, cmd := m.updateInbox(key("R"))
+	mm := res.(Model)
+	if !mm.loading || cmd == nil {
+		t.Error("R is the hard refresh: spinner path")
+	}
+}
+
+func TestCache_DisabledByConfigUsesSpinner(t *testing.T) {
+	m := instantModel(t, 2)
+	f := false
+	m.cfg.UI.InstantFolderSwitch = &f
+	ts := mkEmail(50, "<ts@x>", "queued", "New <n@example.com>", 0, false)
+	ts.Folder = "ToScreen"
+	m.folderCache = map[string]folderSnapshot{cacheKey("P", "ToScreen"): {emails: []imap.Email{ts}}}
+	res, _ := m.updateInbox(keyTab())
+	if !res.(Model).loading {
+		t.Error("instant_folder_switch=false must restore the spinner path")
+	}
+}
+
+func TestCache_HeaderShowsRefreshMarker(t *testing.T) {
+	m := instantModel(t, 1)
+	if strings.Contains(m.View(), "↻") {
+		t.Error("no ↻ when not refreshing")
+	}
+	m.refreshing = true
+	if !strings.Contains(m.View(), "↻") {
+		t.Error("↻ expected while refreshing")
+	}
+}
+
+// :go-spam must mark Spam as the active (off-tab) folder, otherwise the
+// folder guard in emailsLoadedMsg drops its result and the spinner never ends.
+func TestCache_GoSpamCommandResultIsShown(t *testing.T) {
+	m := instantModel(t, 1)
+	m = runCmd(t, m, "go-spam")
+	sp := mkEmail(80, "<sp@x>", "spam", "X <x@example.com>", 0, false)
+	sp.Folder = "Spam"
+	res, _ := m.Update(emailsLoadedMsg{emails: []imap.Email{sp}, folder: "Spam", account: "P"})
+	mm := res.(Model)
+	if mm.loading {
+		t.Error("Spam result must end the spinner")
+	}
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 80 {
+		t.Errorf("list = %v, want Spam [80]", got)
+	}
+}
