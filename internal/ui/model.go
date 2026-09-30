@@ -1176,7 +1176,7 @@ func (m Model) sendReaction(emojiIndex int) (tea.Model, tea.Cmd) {
 	}
 
 	// Build reaction body in markdown (used for both text/plain and text/html parts, same as regular replies)
-	bodyMarkdown := editor.ReactionBody(emoji.emoji, fromName, e.From, m.openBody)
+	bodyMarkdown := editor.ReactionBody(emoji.emoji, fromName, e.From, e.Date.Local(), m.openBody)
 
 	// Get SMTP account matching the selected From. presendFromI is pre-set by
 	// matchFromIndex in enterReactionMode based on which of our addresses
@@ -5835,7 +5835,7 @@ func (m Model) launchReplyWithCC(extraCC string, replyAll bool) (tea.Model, tea.
 		}
 	}
 
-	prelude := editor.ReplyPrelude(to, cc, subject, m.presendFrom(), e.From, m.quotedBody())
+	prelude := editor.ReplyPrelude(to, cc, subject, m.presendFrom(), e.From, e.Date.Local(), m.quotedBody())
 
 	m.pendingIsReply = true
 	m.requeue = requeueRef{}
