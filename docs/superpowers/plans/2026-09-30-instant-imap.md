@@ -23,7 +23,7 @@
 - A cached list is never displayed without `m.refreshing = true` and a fetch in flight.
 - Every user-visible change: `AGENTS.md` invariant + `CHANGELOG.md` entry with regression test names.
 - After any task touching `internal/imap` or the move path: `go test ./... -run Hardening` and `make test-integration` (AGENTS.md Hardening Suite rule; the integration run needs `IMAP_PASS_NEOMD_DEMO` in the environment).
-- Work on branch `perf-instant-imap` off `dev`. Commit after every task. `go test ./...` and `go vet ./...` green before each commit. `gofmt -w` on touched files.
+- Work on branch `speed-improvements` off `dev`. Commit after every task. `go test ./...` and `go vet ./...` green before each commit. `gofmt -w` on touched files.
 - Commit messages end with `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 
 ## Review Focus
@@ -63,7 +63,7 @@
 - [ ] **Step 1: Branch**
 
 ```bash
-git checkout dev && git pull --ff-only && git checkout -b perf-instant-imap
+git checkout speed-improvements
 ```
 
 - [ ] **Step 2: Full green baseline**
@@ -1985,4 +1985,4 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 - [ ] **Step 8: Production soak before merge**
 
-Run neomd on the production config with `NEOMD_IMAP_TRACE=1` for one working day. Before merging `perf-instant-imap` into `dev`, check: `moves.log` has exactly one MOVE line per action taken; `imap-trace.log` shows no errors; no `MOVE-FAILED` lines; `u` undo worked every time it was used.
+Run neomd on the production config with `NEOMD_IMAP_TRACE=1` for one working day. Before merging `speed-improvements` into `dev`, check: `moves.log` has exactly one MOVE line per action taken; `imap-trace.log` shows no errors; no `MOVE-FAILED` lines; `u` undo worked every time it was used.
