@@ -144,12 +144,21 @@ daemon is untouched.
 
 Moved to the background client: `fetchFolderCountsCmd`,
 `bgFetchInboxCmd`, `bgFetchVipFolderCmd`, `bgExecAutoScreenCmd`,
-`spyScanCmd`, `checkOverdueScheduledCmd`, the Layer 4 prefetch, and the
-auto-screen moves issued from `emailsLoadedMsg` (`execAutoScreenCmd`).
+`spyScanCmd`, `checkOverdueScheduledCmd` and the Layer 4 prefetch.
 
 Everything the user triggers directly (folder load, body fetch, move,
 delete, screen, flags, search, undo) stays on the primary connection so
-ordering between a user's consecutive actions is unchanged.
+ordering between a user's consecutive actions is unchanged. The
+auto-screen MOVEs that follow an Inbox load (`execAutoScreenCmd`) also
+stay on the primary connection: they must be serial with the user's next
+folder fetch, otherwise a refresh could list mail that is mid-move and
+the following load would try to screen it again.
+
+While the 5-minute sync is mid-cycle (`bgSyncInProgress`), an Inbox load
+skips its own auto-screen pass: the sync's MOVEs run on the background
+connection and end with a refresh of the visible folder, so a concurrent
+load must not issue a second MOVE for the same mail (which would fail
+with a server NO and surface as an error).
 
 Consequence to be aware of: a MOVE on the background connection while
 the primary has the same folder selected produces untagged EXPUNGE on
