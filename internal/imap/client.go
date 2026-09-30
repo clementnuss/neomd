@@ -536,19 +536,30 @@ func (c *Client) FetchUnseenCounts(ctx context.Context, folders map[string]strin
 	var counts map[string]int
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		counts = make(map[string]int, len(folders)) // reset on retry
+		// Send every STATUS before waiting for any: one round trip instead of
+		// one per folder. STATUS depends on nothing the client has to read first.
+		type inflight struct {
+			label string
+			cmd   *imapclient.StatusCommand
+		}
+		cmds := make([]inflight, 0, len(folders))
 		for label, mailbox := range folders {
-			data, err := conn.Status(mailbox, &imap.StatusOptions{NumUnseen: true}).Wait()
+			cmds = append(cmds, inflight{label, conn.Status(mailbox, &imap.StatusOptions{NumUnseen: true})})
+		}
+		var netErr error
+		for _, f := range cmds {
+			data, err := f.cmd.Wait()
 			if err != nil {
-				if isNetErr(err) {
-					return err // let withConnRetry reconnect
+				if isNetErr(err) && netErr == nil {
+					netErr = err // keep draining the rest, then let withConnRetry reconnect
 				}
 				continue // folder may not exist; skip
 			}
 			if data.NumUnseen != nil {
-				counts[label] = int(*data.NumUnseen)
+				counts[f.label] = int(*data.NumUnseen)
 			}
 		}
-		return nil
+		return netErr
 	})
 	return counts, err
 }
