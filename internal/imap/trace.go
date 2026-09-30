@@ -23,15 +23,17 @@ func SetTracePath(p string) {
 }
 
 // trace appends "<RFC3339Nano> <op> <elapsed>ms". Use as
-// `defer trace("FetchHeaders "+folder, time.Now())`. Failures are ignored —
-// the trace must never block or fail a mail operation.
-func trace(op string, start time.Time) {
+// `defer trace(time.Now(), "FetchHeaders %s n=%d", folder, n)`. Failures are ignored —
+// the trace must never block or fail a mail operation. Deferred arguments are evaluated
+// immediately, so format and args are only evaluated when tracing is enabled (zero cost when disabled).
+func trace(start time.Time, format string, args ...any) {
 	traceMu.Lock()
 	p := tracePath
 	traceMu.Unlock()
 	if p == "" {
 		return
 	}
+	op := fmt.Sprintf(format, args...)
 	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return

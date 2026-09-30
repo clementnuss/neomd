@@ -372,7 +372,7 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("FetchHeaders %s n=%d", folder, n), time.Now())
+	defer trace(time.Now(), "FetchHeaders %s n=%d", folder, n)
 	var emails []Email
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		emails = nil // reset on retry to avoid duplicates
@@ -500,7 +500,7 @@ func (c *Client) SearchUIDs(ctx context.Context, folder string) ([]uint32, error
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace("SearchUIDs "+folder, time.Now())
+	defer trace(time.Now(), "SearchUIDs %s", folder)
 	var uids []uint32
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		uids = nil // reset on retry
@@ -532,7 +532,7 @@ func (c *Client) FetchUnseenCounts(ctx context.Context, folders map[string]strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("FetchUnseenCounts %d folders", len(folders)), time.Now())
+	defer trace(time.Now(), "FetchUnseenCounts %d folders", len(folders))
 	var counts map[string]int
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		counts = make(map[string]int, len(folders)) // reset on retry
@@ -596,7 +596,7 @@ func (c *Client) searchFolder(ctx context.Context, folder string, criteria *imap
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace("searchFolder "+folder, time.Now())
+	defer trace(time.Now(), "searchFolder %s", folder)
 	var uids []uint32
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		uids = nil // reset on retry
@@ -869,7 +869,7 @@ func (c *Client) FetchHeadersByUID(ctx context.Context, folder string, uids []ui
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("FetchHeadersByUID %s count=%d", folder, len(uids)), time.Now())
+	defer trace(time.Now(), "FetchHeadersByUID %s count=%d", folder, len(uids))
 	if len(uids) == 0 {
 		return nil, nil
 	}
@@ -955,7 +955,7 @@ func (c *Client) FetchBody(ctx context.Context, folder string, uid uint32) (stri
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("FetchBody %s uid=%d", folder, uid), time.Now())
+	defer trace(time.Now(), "FetchBody %s uid=%d", folder, uid)
 	var markdown, rawHTML, webURL, references string
 	var attachments []Attachment
 	var spyPixels SpyPixelInfo
@@ -1091,7 +1091,7 @@ func (c *Client) MoveMessage(ctx context.Context, src string, uid uint32, dst st
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("MoveMessage %s uid=%d -> %s", src, uid, dst), time.Now())
+	defer trace(time.Now(), "MoveMessage %s uid=%d -> %s", src, uid, dst)
 	// destUID stays 0 unless the server reports the new UID (UIDPLUS COPYUID).
 	// Guessing "same UID" would let undo move an unrelated message that happens
 	// to carry that UID in the destination folder.
@@ -1177,7 +1177,7 @@ func (c *Client) ExpungeAll(ctx context.Context, folder string, uids []uint32) e
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("ExpungeAll %s count=%d", folder, len(uids)), time.Now())
+	defer trace(time.Now(), "ExpungeAll %s count=%d", folder, len(uids))
 	if len(uids) == 0 {
 		return nil
 	}
@@ -1212,7 +1212,7 @@ func (c *Client) MarkSeen(ctx context.Context, folder string, uid uint32) error 
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("MarkSeen %s uid=%d", folder, uid), time.Now())
+	defer trace(time.Now(), "MarkSeen %s uid=%d", folder, uid)
 	return c.withConn(ctx, func(conn *imapclient.Client) error {
 		if err := c.selectMailbox(folder); err != nil {
 			return err
@@ -1231,7 +1231,7 @@ func (c *Client) MarkUnseen(ctx context.Context, folder string, uid uint32) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(fmt.Sprintf("MarkUnseen %s uid=%d", folder, uid), time.Now())
+	defer trace(time.Now(), "MarkUnseen %s uid=%d", folder, uid)
 	return c.withConn(ctx, func(conn *imapclient.Client) error {
 		if err := c.selectMailbox(folder); err != nil {
 			return err

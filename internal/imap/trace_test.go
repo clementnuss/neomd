@@ -12,7 +12,7 @@ func TestTrace_WritesLineWhenEnabled(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "imap-trace.log")
 	SetTracePath(p)
 	defer SetTracePath("")
-	trace("FetchHeaders INBOX n=200", time.Now().Add(-3*time.Millisecond))
+	trace(time.Now().Add(-3*time.Millisecond), "FetchHeaders %s n=%d", "INBOX", 200)
 	b, err := os.ReadFile(p)
 	if err != nil {
 		t.Fatalf("trace file not written: %v", err)
@@ -29,7 +29,7 @@ func TestTrace_WritesLineWhenEnabled(t *testing.T) {
 func TestTrace_NoopWhenDisabled(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "imap-trace.log")
 	SetTracePath("")
-	trace("Ping", time.Now())
+	trace(time.Now(), "Ping")
 	if _, err := os.Stat(p); !os.IsNotExist(err) {
 		t.Errorf("trace file must not exist when disabled")
 	}
