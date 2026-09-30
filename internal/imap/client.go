@@ -355,6 +355,10 @@ func (c *Client) Addr() string { return c.addr() }
 // User returns the IMAP username.
 func (c *Client) User() string { return c.cfg.User }
 
+// ConfigCopy returns the connection config so a second client (background
+// connection) can be built with identical credentials and TokenSource.
+func (c *Client) ConfigCopy() Config { return c.cfg }
+
 // Ping tests the IMAP connection by issuing a NOOP command.
 func (c *Client) Ping(ctx context.Context) error {
 	if ctx == nil {

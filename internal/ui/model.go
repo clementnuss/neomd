@@ -542,6 +542,7 @@ type Model struct {
 	cfg         *config.Config
 	accounts    []config.AccountConfig // all configured accounts
 	clients     []*imap.Client         // one IMAP client per account
+	bgClients   []*imap.Client         // second connection per account for housekeeping (nil = share primary)
 	accountI    int                    // index of the active account
 	screener    *screener.Screener
 	notifier    *notify.Notifier
@@ -917,6 +918,24 @@ func (m Model) imapCli() *imap.Client {
 	return m.primaryIMAPClient()
 }
 
+// bgImapCli returns the background IMAP connection for the active account,
+// used for housekeeping that must never delay a user action (tab counts,
+// 5-minute sync, spy scan, prefetch). Falls back to imapCli() when no
+// background client exists, so every nil-client rule keeps holding.
+func (m Model) bgImapCli() *imap.Client {
+	if m.accountI < len(m.bgClients) && m.bgClients[m.accountI] != nil {
+		return m.bgClients[m.accountI]
+	}
+	return m.imapCli()
+}
+
+// WithBackgroundClients attaches one background IMAP client per account
+// (same order as clients; nil entries allowed).
+func (m Model) WithBackgroundClients(bg []*imap.Client) Model {
+	m.bgClients = bg
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.spinner.Tick,
@@ -958,6 +977,9 @@ func countOverdueScheduled(emails []imap.Email, now time.Time) int {
 // email. Fetch errors are silent (network hiccups resolve on the next tick).
 func (m Model) checkOverdueScheduledCmd() tea.Cmd {
 	cli := m.sentDraftsIMAPClient()
+	if cli == m.imapCli() {
+		cli = m.bgImapCli()
+	}
 	folder := m.cfg.Folders.Scheduled
 	return func() tea.Msg {
 		if cli == nil || folder == "" {
@@ -1873,7 +1895,7 @@ func (m Model) deepScreenClassifyCmd(accumulated []imap.Email, remaining []uint3
 // and returns results via message for the Update loop to merge.
 func (m Model) spyScanCmd() tea.Cmd {
 	folder := m.activeFolder()
-	cli := m.imapCli()
+	cli := m.bgImapCli()
 	// Copy scanned set to avoid concurrent read.
 	alreadyScanned := make(map[string]bool, len(m.spyScannedKeys))
 	for k, v := range m.spyScannedKeys {
@@ -2009,7 +2031,7 @@ func (m Model) fetchFolderCountsCmd() tea.Cmd {
 		"Scheduled":  m.cfg.Folders.Scheduled,
 	}
 	return func() tea.Msg {
-		counts, _ := m.imapCli().FetchUnseenCounts(nil, folders)
+		counts, _ := m.bgImapCli().FetchUnseenCounts(nil, folders)
 		return folderCountsMsg{counts: counts}
 	}
 }
@@ -2040,8 +2062,8 @@ func (m Model) scheduleMarkAsReadTimer(uid uint32, folder string) tea.Cmd {
 // Errors are swallowed — a transient network hiccup shouldn't disrupt the UI.
 func (m Model) bgFetchInboxCmd() tea.Cmd {
 	return func() tea.Msg {
-		m.imapCli().ResetMailboxSelection() // force fresh SELECT to see new messages
-		emails, err := m.imapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, m.cfg.UI.InboxCount)
+		m.bgImapCli().ResetMailboxSelection() // force fresh SELECT to see new messages
+		emails, err := m.bgImapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, m.cfg.UI.InboxCount)
 		if err != nil {
 			// Return nil to let the next scheduled tick retry naturally.
 			// Returning bgSyncTickMsg{} here creates an infinite loop on persistent errors!
@@ -2057,7 +2079,7 @@ func (m Model) bgFetchInboxCmd() tea.Cmd {
 // no UI mutation beyond a brief status update.
 func (m Model) bgFetchVipFolderCmd(folder string) tea.Cmd {
 	return func() tea.Msg {
-		cli := m.imapCli()
+		cli := m.bgImapCli()
 		if cli == nil {
 			return bgVipFolderFetchedMsg{folder: folder, emails: nil}
 		}
@@ -2133,7 +2155,7 @@ func (m Model) bgExecAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
 	return func() tea.Msg {
 		moved := 0
 		for _, mv := range moves {
-			if _, err := m.imapCli().MoveMessage(nil, src, mv.email.UID, mv.dst); err != nil {
+			if _, err := m.bgImapCli().MoveMessage(nil, src, mv.email.UID, mv.dst); err != nil {
 				break
 			}
 			moved++
@@ -2299,7 +2321,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Controlled by ui.auto_screen_on_load (default true).
 		// Skip when all screener lists are empty — otherwise every email would
 		// be moved to ToScreen on first run, confusing new users.
-		if msg.folder == m.cfg.Folders.Inbox && m.cfg.UI.AutoScreen() && !m.screener.IsEmpty() {
+		// Skip while the 5-minute sync is mid-cycle: its MOVEs run on the
+		// background connection and end with a refresh; a second MOVE for the
+		// same mail would fail with a server NO.
+		if msg.folder == m.cfg.Folders.Inbox && m.cfg.UI.AutoScreen() && !m.screener.IsEmpty() && !m.bgSyncInProgress {
 			if err := m.validateScreenerSafety(); err != nil {
 				m.status = err.Error()
 				m.isError = true

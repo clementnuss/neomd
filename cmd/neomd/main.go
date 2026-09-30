@@ -127,6 +127,22 @@ func main() {
 		}
 	}()
 
+	// Second connection per account for background housekeeping (tab counts,
+	// 5-minute sync, spy scan, prefetch) so it never queues behind a user action.
+	bgClients := make([]*goIMAP.Client, len(imapClients))
+	for i, c := range imapClients {
+		if c != nil {
+			bgClients[i] = goIMAP.New(c.ConfigCopy())
+		}
+	}
+	defer func() {
+		for _, c := range bgClients {
+			if c != nil {
+				c.Close()
+			}
+		}
+	}()
+
 	// `neomd list ...` — read-only JSON dump of folder headers for external
 	// widgets (e.g. the omarchy bar plugin). Uses the first IMAP-enabled
 	// account, prints one JSON object, exits 0 even on failure.
@@ -230,7 +246,7 @@ func main() {
 		if mailtoURI != "" {
 			mailto = parseMailto(mailtoURI)
 		}
-		model := ui.New(cfg, imapClients, sc, mailto)
+		model := ui.New(cfg, imapClients, sc, mailto).WithBackgroundClients(bgClients)
 
 		p := tea.NewProgram(
 			model,
