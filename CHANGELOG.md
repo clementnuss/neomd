@@ -29,7 +29,8 @@
   source mailbox stays selected and every neomd operation afterwards is UID-addressed, so
   sequence-number shifts from the server's untagged EXPUNGE can't misaddress anything
   (10 marked emails: 20→11 round trips). No server-side operation changed, only when
-  responses are awaited. Pinned by a new in-memory IMAP server harness
+  responses are awaited. A failed SELECT now also clears the cached selection
+  (`TestMem_FailedSelectClearsCachedSelection`). Pinned by a new in-memory IMAP server harness
   (`internal/imap/memserver_test.go`, `imapserver/imapmemserver` on loopback TLS) and live
   integration tests. Tests: `TestMem_FetchHeaders_MissingMailboxKeepsConnectionUsable`,
   `TestMem_FetchHeaders_SecondCallSkipsSelect`, `TestMem_FetchUnseenCounts`,
@@ -71,7 +72,24 @@
   unconditionally. Screener sender-expansion (one unmarked ToScreen row screens in every
   queued mail from that sender) is mirrored locally by removing every loaded row with
   the same `normalizedSender`. Bulk progress (`bulkProgress`) now renders in the status
-  line while the list stays visible instead of in the hidden-list spinner branch. Tests:
+  line while the list stays visible instead of in the hidden-list spinner branch.
+  Review fixes: a refresh already in flight when a row was removed used to put it back
+  until the MOVE finished — `removeFromList` now records each row in `pendingRemoval`,
+  `optimisticRemove`/`releaseOnDone` tag the MOVE's done message with exactly those keys,
+  and fetch results are filtered (`withoutPending`) until then. On error the source
+  folders' trimmed snapshots are dropped (an `x` in Inbox followed by a Tab no longer
+  leaves Inbox's cache missing the row), and an error inside a Search/Thread/… view
+  leaves that view and reloads the tab folder instead of keeping a trimmed list with no
+  reload. The auto-screen MOVE plans capture `(uid, dst)` by value
+  (`autoScreenPlan`): the background sync read `mv.email.UID` through a pointer into the
+  cached Inbox slice, which a cache-hit Tab re-sorted in place — the MOVEs could hit the
+  wrong messages (and it was a data race); the background Inbox snapshot is now cached
+  as a copy too. Tests:
+  `TestOptimistic_LateRefreshDoesNotResurfaceRemovedRow`,
+  `TestOptimistic_ErrorReleasesPendingRemoval`,
+  `TestOptimistic_ErrorDropsOriginFolderCache`,
+  `TestOptimistic_ErrorInSearchViewReloadsTabFolder`,
+  `TestAutoScreenPlan_CapturesUIDsByValue`, `TestCache_BgInboxSnapshotIsACopy`,
   `TestOptimistic_DeleteRemovesRowImmediately`,
   `TestOptimistic_BatchDoneSuccessRefreshesInBackground`,
   `TestOptimistic_BatchErrorReloadsAndKeepsPartialUndo`,
@@ -98,7 +116,18 @@
   active account changed mid-cycle (`bgInboxFetchedMsg` now carries the account too).
   Kill switch: `[ui] instant_folder_switch = true` (default); `false` restores today's
   spinner-on-every-switch behavior while Layers 1–3 stay active. Off-tab views (Search,
-  Everything, Thread, Sender, Merge, Drafts, Spam) are not cached themselves. Tests:
+  Everything, Thread, Sender, Merge, Drafts, Spam) are not cached themselves.
+  Review fixes: `ctrl+a` from a Search/Thread/… view kept the old account's rows on
+  screen, actionable against the new account's client — account switch, `<space>N`,
+  `g<x>` and tab clicks now leave the synthetic view completely, and `ctrl+a` resets
+  the prefetch flag so the new account's tabs are warmed. A background refresh no longer
+  wipes marks (kept for rows still present) or the `/` filter. A failed fetch of the
+  folder just switched to (new `folderErrMsg` with folder+account; generic `errMsg`
+  unchanged for other senders) no longer leaves the previous folder's rows under the new
+  header, and a stale failure for another folder is ignored. Tests:
+  `TestCache_AccountSwitchLeavesSyntheticView`, `TestCache_LeaderFolderChordLeavesSearchView`,
+  `TestCache_AccountSwitchCapturesNewAccount`, `TestCache_BackgroundRefreshKeepsMarksAndFilter`,
+  `TestCache_FolderFetchErrorClearsPreviousFolderRows`,
   `TestCache_SwitchToCachedFolderIsInstant`, `TestCache_SwitchToUncachedFolderShowsSpinner`,
   `TestCache_LoadedResultIsCachedAndShownOnlyForActiveFolder`,
   `TestCache_LateResultForOtherFolderIsCachedNotShown`, `TestCache_KeyedByAccount`,

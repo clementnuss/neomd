@@ -209,15 +209,13 @@ visible and usable at once.
   are reconciled by the background refresh.
 - **Auto-screen on Inbox load**: `previewAutoScreen()` already knows the
   moves before display. The moved emails are removed from the list
-  before the first draw, the MOVEs run on the background connection, and
+  before the first draw, the MOVEs run on the primary connection, and
   the list is never hidden. Error → full reload, as today.
 - **Bulk progress**: `bulkProgress` (n/total) is rendered in the status
   line while it is non-nil instead of in the hidden-list spinner branch.
   Same information, list stays visible.
 - **Undo** (`u`) is unchanged: restored emails are not known locally, so
   it keeps the spinner reload.
-- **Reader-view actions** that move the open email go through the same
-  helper when they return to the inbox.
 
 Server-side calls, order, audit-log lines, undo UIDs, screener list
 writes and rollbacks are byte-for-byte what they are today. Only the

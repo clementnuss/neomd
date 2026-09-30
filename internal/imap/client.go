@@ -294,6 +294,7 @@ func (c *Client) selectMailbox(mailbox string) error {
 		return nil
 	}
 	if _, err := c.conn.Select(mailbox, nil).Wait(); err != nil {
+		c.selectedMailbox = "" // a failed SELECT leaves no mailbox selected (RFC 9051 §6.3.2)
 		return fmt.Errorf("SELECT %q: %w", mailbox, err)
 	}
 	c.selectedMailbox = mailbox

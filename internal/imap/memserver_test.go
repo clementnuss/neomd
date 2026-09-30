@@ -267,3 +267,17 @@ func TestMem_MoveMessage_KeepsSelectionAndBatchWorks(t *testing.T) {
 		t.Errorf("Trash after 3 moves = %v, want [3 2 1]", uidsOf(dst))
 	}
 }
+
+func TestMem_FailedSelectClearsCachedSelection(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMessage(t, user, "INBOX", "x", false)
+	if _, err := cli.FetchHeaders(context.Background(), "INBOX", 10); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.MoveMessage(context.Background(), "NoSuchBox", 1, "Trash"); err == nil {
+		t.Fatal("expected SELECT error for missing mailbox")
+	}
+	if cli.selectedMailbox != "" {
+		t.Errorf("selectedMailbox = %q after failed SELECT, want empty", cli.selectedMailbox)
+	}
+}

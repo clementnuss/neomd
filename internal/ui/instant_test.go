@@ -5,6 +5,7 @@ package ui
 // bubbletea Update handlers with real messages; no network.
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -534,5 +535,299 @@ func TestBgSync_SkipsAutoScreenWhenAccountChanged(t *testing.T) {
 	}
 	if snap, ok := mm.folderCache[cacheKey("W", "INBOX")]; !ok || len(snap.emails) != len(m.emails) {
 		t.Error("snapshot must still be cached under the fetched account W")
+	}
+}
+
+// ── Final-review fix wave ─────────────────────────────────────────────────
+
+// C1: a MOVE plan must hold (uid, dst) by value. The background MOVEs run
+// serially on another goroutine; if they read UIDs through pointers into a
+// slice that the UI later re-sorts (cache-hit Tab to Inbox), they would move
+// the wrong messages.
+func TestAutoScreenPlan_CapturesUIDsByValue(t *testing.T) {
+	emails := []imap.Email{
+		mkEmail(10, "<a@x>", "blocked", "Zed <z@example.com>", 0, false),
+		mkEmail(11, "<b@x>", "unknown", "Amy <a@example.com>", 0, false),
+	}
+	moves := []autoScreenMove{{email: &emails[0], dst: "ScreenedOut"}, {email: &emails[1], dst: "ToScreen"}}
+	plan := autoScreenPlan(moves)
+	// The UI re-sorts the shared backing array in place (sort by from).
+	sort.SliceStable(emails, func(i, j int) bool { return emails[i].From < emails[j].From })
+	if emails[0].UID != 11 {
+		t.Fatal("test setup: sort must have swapped the rows")
+	}
+	want := []screenMove{{uid: 10, dst: "ScreenedOut"}, {uid: 11, dst: "ToScreen"}}
+	if len(plan) != len(want) {
+		t.Fatalf("plan = %+v", plan)
+	}
+	for i := range want {
+		if plan[i] != want[i] {
+			t.Errorf("plan[%d] = %+v, want %+v (plan must not follow a later sort)", i, plan[i], want[i])
+		}
+	}
+}
+
+// C1: the background Inbox snapshot must not share its backing array with
+// the fetched slice the screener classified — a cache-hit Tab sorts
+// m.emails (= the snapshot) in place.
+func TestCache_BgInboxSnapshotIsACopy(t *testing.T) {
+	m := instantModel(t, 1)
+	m.activeFolderI = 1 // on ToScreen
+	older := mkEmail(10, "<o@x>", "older", "X <x@example.com>", 5, false)
+	older.Folder = "INBOX"
+	newer := mkEmail(11, "<n@x>", "newer", "Y <y@example.com>", 0, false)
+	newer.Folder = "INBOX"
+	fetched := []imap.Email{older, newer} // UID order; date-desc sort swaps them
+	res, _ := m.Update(bgInboxFetchedMsg{emails: fetched, account: "P"})
+	mm := res.(Model)
+	res, _ = mm.updateInbox(tea.KeyMsg{Type: tea.KeyShiftTab}) // cache hit: Inbox re-sorted
+	mm = res.(Model)
+	if got := uidsInList(mm); len(got) != 2 || got[0] != 11 {
+		t.Fatalf("test setup: Inbox list = %v, want [11 10]", got)
+	}
+	if fetched[0].UID != 10 || fetched[1].UID != 11 {
+		t.Errorf("re-sorting the cached Inbox reordered the fetched slice: %d,%d", fetched[0].UID, fetched[1].UID)
+	}
+}
+
+// twoAccountModel is instantModel with a second account W and stub clients.
+func twoAccountModel(t *testing.T, n int) Model {
+	t.Helper()
+	m := instantModel(t, n)
+	m.cfg.Accounts = append(m.cfg.Accounts, config.AccountConfig{Name: "W", From: "w@x"})
+	m.accounts = m.cfg.ActiveAccounts()
+	m.clients = []*imap.Client{imap.New(imap.Config{}), imap.New(imap.Config{})}
+	return m
+}
+
+func searchView(m Model) Model {
+	hit := mkEmail(90, "<hit@x>", "search hit", "X <x@example.com>", 0, false)
+	hit.Folder = "Archive"
+	m.offTabFolder = "Search"
+	m.imapSearchResults = true
+	m.imapSearchText = "hit"
+	m.emails = []imap.Email{hit}
+	m.applyFilter()
+	m.inbox.Select(0)
+	return m
+}
+
+// C2: ctrl+a from a synthetic view must leave it; otherwise account P's
+// search hits stay on screen (and actionable) under account W.
+func TestCache_AccountSwitchLeavesSyntheticView(t *testing.T) {
+	m := searchView(twoAccountModel(t, 1))
+	m.prefetched = true
+	res, cmd := m.updateInbox(tea.KeyMsg{Type: tea.KeyCtrlA})
+	mm := res.(Model)
+	if cmd == nil || mm.accountI != 1 {
+		t.Fatalf("ctrl+a must switch to W and load: accountI=%d cmd=%v", mm.accountI, cmd != nil)
+	}
+	if mm.offTabFolder != "" || mm.imapSearchResults || mm.imapSearchText != "" {
+		t.Errorf("synthetic view kept: offTab=%q results=%v text=%q", mm.offTabFolder, mm.imapSearchResults, mm.imapSearchText)
+	}
+	if mm.prefetched {
+		t.Error("prefetched must reset so the new account's tabs get prefetched")
+	}
+	w := mkEmail(70, "<w@x>", "work", "X <x@example.com>", 0, false)
+	w.Folder = "INBOX"
+	res, _ = mm.Update(emailsLoadedMsg{emails: []imap.Email{w}, folder: "INBOX", account: "W"})
+	mm = res.(Model)
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 70 {
+		t.Errorf("W's INBOX must replace P's search rows, list = %v", got)
+	}
+}
+
+// C2: the <space>N folder chord leaves a search view completely too.
+func TestCache_LeaderFolderChordLeavesSearchView(t *testing.T) {
+	m := searchView(instantModel(t, 1))
+	res, _ := m.updateInbox(key(" "))
+	res, _ = res.(Model).updateInbox(key("2"))
+	mm := res.(Model)
+	if mm.offTabFolder != "" || mm.imapSearchResults || mm.imapSearchText != "" {
+		t.Errorf("search view kept: offTab=%q results=%v text=%q", mm.offTabFolder, mm.imapSearchResults, mm.imapSearchText)
+	}
+}
+
+// I6: the fetch fired by ctrl+a is built for the new account.
+func TestCache_AccountSwitchCapturesNewAccount(t *testing.T) {
+	m := twoAccountModel(t, 1)
+	res, _ := m.updateInbox(tea.KeyMsg{Type: tea.KeyCtrlA})
+	mm := res.(Model)
+	if mm.accountI != 1 {
+		t.Fatalf("accountI = %d, want 1", mm.accountI)
+	}
+	if got := mm.fetchFolderMsgFor("INBOX"); got.account != "W" || got.folder != "INBOX" {
+		t.Errorf("fetch after ctrl+a built for %q/%q, want W/INBOX", got.account, got.folder)
+	}
+}
+
+// batchDoneOf runs cmd (unwrapping tea.Batch) and returns its batchDoneMsg.
+// Stub clients refuse to connect, so the MOVE fails at once without network.
+func batchDoneOf(t *testing.T, cmd tea.Cmd) batchDoneMsg {
+	t.Helper()
+	for _, msg := range runCmds(t, cmd) {
+		if bd, ok := msg.(batchDoneMsg); ok {
+			return bd
+		}
+	}
+	t.Fatal("no batchDoneMsg produced")
+	return batchDoneMsg{}
+}
+
+func inboxRows(uids ...uint32) []imap.Email {
+	var out []imap.Email
+	for _, u := range uids {
+		e := mkEmail(u, "<r@x>", "s", "Sender <s@example.com>", int(10-u), true)
+		e.Folder = "INBOX"
+		out = append(out, e)
+	}
+	return out
+}
+
+// I1: a refresh that was already in flight when x removed a row still
+// contains it; it must not resurface until the MOVE finished.
+func TestOptimistic_LateRefreshDoesNotResurfaceRemovedRow(t *testing.T) {
+	m := instantModel(t, 3) // 3,2,1
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	m.refreshing = true                 // cache-hit refresh in flight
+	res, cmd := m.updateInbox(key("x")) // removes 3
+	mm := res.(Model)
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(3, 2, 1), folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	for _, u := range uidsInList(mm) {
+		if u == 3 {
+			t.Fatalf("removed row resurfaced from a stale refresh: %v", uidsInList(mm))
+		}
+	}
+	if snap := mm.folderCache[cacheKey("P", "INBOX")]; len(snap.emails) != 2 {
+		t.Errorf("stale refresh must not re-cache the removed row: %d rows", len(snap.emails))
+	}
+	res, _ = mm.Update(bgInboxFetchedMsg{emails: inboxRows(3, 2, 1), account: "P"})
+	mm = res.(Model)
+	if snap := mm.folderCache[cacheKey("P", "INBOX")]; len(snap.emails) != 2 {
+		t.Errorf("bg fetch must not re-cache the removed row: %d rows", len(snap.emails))
+	}
+	mm.bgSyncInProgress = false
+	done := batchDoneOf(t, cmd)
+	if len(done.removed) != 1 {
+		t.Fatalf("done msg must carry the removed key, got %+v", done.removed)
+	}
+	done.err = nil // success path
+	res, _ = mm.Update(done)
+	mm = res.(Model)
+	if len(mm.pendingRemoval) != 0 {
+		t.Errorf("pending removals must be released on done: %v", mm.pendingRemoval)
+	}
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(3, 2, 1), folder: "INBOX", account: "P"})
+	if got := uidsInList(res.(Model)); len(got) != 3 {
+		t.Errorf("after the MOVE finished the server list is the truth, got %v", got)
+	}
+}
+
+// I1: the error branch releases the keys too (the reload is the truth).
+func TestOptimistic_ErrorReleasesPendingRemoval(t *testing.T) {
+	m := instantModel(t, 3)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	res, cmd := m.updateInbox(key("x"))
+	mm := res.(Model)
+	done := batchDoneOf(t, cmd)
+	if done.err == nil {
+		t.Fatal("stub client must fail the MOVE")
+	}
+	res, _ = mm.Update(done)
+	mm = res.(Model)
+	if len(mm.pendingRemoval) != 0 {
+		t.Errorf("error must release pending removals: %v", mm.pendingRemoval)
+	}
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(3, 2, 1), folder: "INBOX", account: "P"})
+	if got := uidsInList(res.(Model)); len(got) != 3 {
+		t.Errorf("error reload must restore the row, got %v", got)
+	}
+}
+
+// I2: x in INBOX, Tab to cached ToScreen, MOVE fails → the INBOX snapshot
+// (optimistically trimmed) must be dropped, not served on the next Tab.
+func TestOptimistic_ErrorDropsOriginFolderCache(t *testing.T) {
+	m := instantModel(t, 3)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	ts := mkEmail(50, "<ts@x>", "queued", "New <n@example.com>", 0, false)
+	ts.Folder = "ToScreen"
+	m.folderCache = map[string]folderSnapshot{
+		cacheKey("P", "INBOX"):    {emails: append([]imap.Email(nil), m.emails...)},
+		cacheKey("P", "ToScreen"): {emails: []imap.Email{ts}},
+	}
+	res, cmd := m.updateInbox(key("x"))
+	mm := res.(Model)
+	res, _ = mm.updateInbox(keyTab()) // ToScreen, cache hit
+	mm = res.(Model)
+	res, _ = mm.Update(batchDoneOf(t, cmd))
+	mm = res.(Model)
+	if _, ok := mm.folderCache[cacheKey("P", "INBOX")]; ok {
+		t.Error("origin folder snapshot must be dropped after a failed MOVE")
+	}
+}
+
+// I3: an optimistic error inside a synthetic view leaves the view and
+// reloads the tab folder, instead of keeping a trimmed list forever.
+func TestOptimistic_ErrorInSearchViewReloadsTabFolder(t *testing.T) {
+	m := searchView(instantModel(t, 1))
+	res, _ := m.updateInbox(key("x"))
+	mm := res.(Model)
+	res, cmd := mm.Update(batchDoneMsg{err: testErr("MOVE NO")})
+	mm = res.(Model)
+	if mm.offTabFolder != "" || mm.imapSearchResults || !mm.loading || cmd == nil {
+		t.Errorf("batch error: offTab=%q results=%v loading=%v cmd=%v", mm.offTabFolder, mm.imapSearchResults, mm.loading, cmd != nil)
+	}
+	m2 := searchView(instantModel(t, 1))
+	res, cmd = m2.Update(autoScreenDoneMsg{err: testErr("MOVE NO")})
+	mm = res.(Model)
+	if mm.offTabFolder != "" || mm.imapSearchResults || !mm.loading || cmd == nil {
+		t.Errorf("auto-screen error: offTab=%q results=%v loading=%v cmd=%v", mm.offTabFolder, mm.imapSearchResults, mm.loading, cmd != nil)
+	}
+}
+
+// I4: a background refresh keeps marks (for rows that still exist) and the
+// / filter; a spinner reload still clears them.
+func TestCache_BackgroundRefreshKeepsMarksAndFilter(t *testing.T) {
+	m := instantModel(t, 3)
+	m.refreshing = true
+	m.markedUIDs[2] = true
+	m.markedUIDs[3] = true
+	m.filterText = "sender"
+	m.applyFilter()
+	res, _ := m.Update(emailsLoadedMsg{emails: inboxRows(2, 1), folder: "INBOX", account: "P"})
+	mm := res.(Model)
+	if !mm.markedUIDs[2] || mm.markedUIDs[3] || len(mm.markedUIDs) != 1 {
+		t.Errorf("marks after refresh = %v, want {2}", mm.markedUIDs)
+	}
+	if mm.filterText != "sender" {
+		t.Errorf("filter text lost: %q", mm.filterText)
+	}
+	mm.loading = true // spinner reload
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(2, 1), folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	if len(mm.markedUIDs) != 0 || mm.filterText != "" {
+		t.Errorf("spinner reload must clear marks/filter: %v %q", mm.markedUIDs, mm.filterText)
+	}
+}
+
+// I5: a failed fetch of the folder the user just switched to must not leave
+// the previous folder's rows under the new header.
+func TestCache_FolderFetchErrorClearsPreviousFolderRows(t *testing.T) {
+	m := instantModel(t, 3)
+	res, _ := m.updateInbox(keyTab()) // ToScreen, uncached: spinner
+	mm := res.(Model)
+	res, _ = mm.Update(folderErrMsg{folder: "Archive", account: "P", err: testErr("stale")})
+	mm = res.(Model)
+	if !mm.loading {
+		t.Error("an error for another folder must not end ToScreen's spinner")
+	}
+	res, _ = mm.Update(folderErrMsg{folder: "ToScreen", account: "P", err: testErr("NO")})
+	mm = res.(Model)
+	if mm.loading || !mm.isError {
+		t.Errorf("loading=%v isError=%v", mm.loading, mm.isError)
+	}
+	if got := uidsInList(mm); len(got) != 0 {
+		t.Errorf("INBOX rows shown under ToScreen after its fetch failed: %v", got)
 	}
 }
