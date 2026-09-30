@@ -216,3 +216,40 @@ func TestOptimistic_SpinnerPathsKeepSpinnerReload(t *testing.T) {
 		t.Errorf("autoScreenDone after spinner op: loading=%v refreshing=%v", mm.loading, mm.refreshing)
 	}
 }
+
+func TestOptimistic_CursorStaysOnSameEmailWhenRowsAboveRemoved(t *testing.T) {
+	m := instantModel(t, 6) // list: 6,5,4,3,2,1
+	m.markedUIDs[6] = true
+	m.markedUIDs[5] = true
+	m.applyFilter()
+	m.inbox.Select(3) // uid 3, unmarked
+	res, _ := m.updateInbox(key("A"))
+	mm := res.(Model)
+	if got := uidsInList(mm); len(got) != 4 || got[0] != 4 {
+		t.Fatalf("list = %v, want [4 3 2 1]", got)
+	}
+	if e := selectedEmail(mm.inbox); e == nil || e.UID != 3 {
+		t.Errorf("cursor must stay on uid 3, got %+v", e)
+	}
+}
+
+func TestOptimistic_CursorLandsOnNextRowAfterSenderExpansionAbove(t *testing.T) {
+	m := instantModel(t, 6) // list: 6,5,4,3,2,1 = S1,S2,Z,S3,D,E
+	m.activeFolderI = 1
+	for i := range m.emails {
+		m.emails[i].Folder = "ToScreen"
+	}
+	m.emails[2].From = "Z <z@example.com>" // uid 4
+	m.emails[4].From = "D <d@example.com>" // uid 2
+	m.emails[5].From = "E <e@example.com>" // uid 1
+	m.applyFilter()
+	m.inbox.Select(3) // uid 3 = S3
+	res, _ := m.updateInbox(key("I"))
+	mm := res.(Model)
+	if got := uidsInList(mm); len(got) != 3 || got[0] != 4 || got[1] != 2 || got[2] != 1 {
+		t.Fatalf("list = %v, want [4 2 1]", got)
+	}
+	if e := selectedEmail(mm.inbox); e == nil || e.UID != 2 {
+		t.Errorf("cursor must land on D (uid 2), got %+v", e)
+	}
+}

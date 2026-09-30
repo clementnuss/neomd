@@ -1556,29 +1556,51 @@ func (m *Model) reselectEmail(prev *imap.Email) {
 }
 
 // removeFromList drops targets (matched by folder+UID) from the visible list
-// and rebuilds it. The cursor keeps its index so it lands on the next row,
-// exactly as it does after today's post-move reload. Marks are cleared as a
-// reload would. It never touches the server: the caller fires the same MOVE
-// command as before, and any error there ends in a full reload.
+// and rebuilds it. If the cursor email survives, the cursor stays on it
+// (as reselectEmail does after a reload); if it was removed, the cursor
+// lands on the row that followed it, exactly as after today's post-move
+// reload. Marks are cleared as a reload would. It never touches the server:
+// the caller fires the same MOVE command as before, and any error there
+// ends in a full reload.
 func (m *Model) removeFromList(targets []imap.Email) tea.Cmd {
+	key := func(e imap.Email) string { return e.Folder + "\x00" + strconv.FormatUint(uint64(e.UID), 10) }
 	gone := make(map[string]bool, len(targets))
 	for _, e := range targets {
-		gone[e.Folder+"\x00"+strconv.FormatUint(uint64(e.UID), 10)] = true
+		gone[key(e)] = true
+	}
+	prev := selectedEmail(m.inbox)
+	idx := m.inbox.Index()
+	above := 0 // removed rows above the cursor shift the next row up
+	for i, it := range m.inbox.Items() {
+		if i >= idx {
+			break
+		}
+		if e, ok := it.(emailItem); ok && gone[key(e.email)] {
+			above++
+		}
 	}
 	kept := m.emails[:0:0]
 	for _, e := range m.emails {
-		if !gone[e.Folder+"\x00"+strconv.FormatUint(uint64(e.UID), 10)] {
+		if !gone[key(e)] {
 			kept = append(kept, e)
 		}
 	}
 	m.emails = kept
 	m.markedUIDs = make(map[uint32]bool)
-	idx := m.inbox.Index()
 	cmd := m.sortEmails()
-	if n := len(m.inbox.Items()); idx >= n && n > 0 {
+	if prev != nil && !gone[key(*prev)] {
+		m.reselectEmail(prev)
+		return cmd
+	}
+	idx -= above
+	n := len(m.inbox.Items())
+	if idx >= n {
 		idx = n - 1
 	}
-	if idx >= 0 {
+	if idx < 0 {
+		idx = 0
+	}
+	if n > 0 {
 		m.inbox.Select(idx)
 	}
 	return cmd
