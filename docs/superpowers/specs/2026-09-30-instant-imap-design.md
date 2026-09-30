@@ -291,12 +291,12 @@ are not cached; they keep today's behavior.
 
 ## Round trips after
 
-| Action | Today | After | Perceived |
+| Action | Today | RTTs before redraw (then async on primary) | Perceived |
 |---|---|---|---|
-| Folder switch, seen before | 3 (+4 queued) | 0 (2 in background) | instant |
+| Folder switch, seen before | 3 (+4 queued) | 0 (2 behind the list, primary connection) | instant |
 | Folder switch, first time | 3 (+4 queued) | 2 (+1 on bg connection) | ~2 RTT |
-| Screen-in `I` on one row | ~10 | 0 (3 in background) | instant |
-| Delete/archive/move N rows | 2N + 7 | 0 (N in background) | instant |
+| Screen-in `I` on one row | ~10 | 0 (3 behind the list, primary connection) | instant |
+| Delete/archive/move N rows | 2N + 7 | 0 (N behind the list, primary connection) | instant |
 | Open email | 1–2 | 1–2 | unchanged |
 | Search across folders | 2 per folder | 1 per folder | halved |
 
