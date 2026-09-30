@@ -1895,6 +1895,16 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 
 ---
 
+## Baseline numbers
+
+| Op (Hostpoint demo)            | Serial today | Pipelined |
+|--------------------------------|-------------:|----------:|
+| 4× STATUS                      | 1114 ms      | 204 ms    |
+| Switch Inbox (SELECT,SEARCH,FETCH) | 883 ms   | 517 ms    |
+| Switch ToScreen                | 1238 ms      | 655 ms    |
+
+---
+
 ### Task 10: Docs, after-numbers, final verification
 
 **Files:**
