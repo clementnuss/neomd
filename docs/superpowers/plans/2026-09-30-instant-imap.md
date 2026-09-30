@@ -1903,6 +1903,53 @@ Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>"
 | Switch Inbox (SELECT,SEARCH,FETCH) | 883 ms   | 517 ms    |
 | Switch ToScreen                | 1238 ms      | 655 ms    |
 
+### After (IMAP layer, same demo account)
+
+Measured 2026-09-30 with a throwaway program (`.bench/main.go`, not committed —
+no TTY was available in this environment to drive the TUI directly) against
+`~/.config/neomd-demo-hostpoint/config.toml`, calling the already-pipelined
+Layer 1 methods (`Ping`, `FetchHeaders`, `FetchUnseenCounts`) directly. Two
+full runs of 3 iterations each; table shows the median of all 6 samples per
+operation.
+
+| Op (Hostpoint demo)                              | After (median of 6) |
+|---------------------------------------------------|---------------------:|
+| NOOP (`Ping`)                                      | 17 ms                |
+| `FetchHeaders(Inbox, 200)`                         | 70 ms                |
+| `FetchHeaders(ToScreen, 200)`                      | 92 ms                |
+| `FetchUnseenCounts` (Inbox/PaperTrail/Waiting/Scheduled) | 33 ms          |
+
+The network on 2026-09-30 during this run measured NOOP round trip **~10–17 ms
+steady-state** (one connection-setup outlier per run at ~288–291 ms, excluded
+from the median above) — far better than the "Serial today / Pipelined"
+baseline round's **250–450 ms** NOOP RTT (saturated Wi-Fi link, backup job
+running). The two tables are not directly comparable for that reason; use the
+NOOP RTT of each run to normalize (e.g. `FetchHeaders(Inbox)` here at ~70 ms
+over a ~17 ms link is roughly 4 round trips' worth of latency, consistent
+with 2 pipelined round trips plus TLS/protocol overhead on a fast link).
+Raw per-run numbers are in the Task 10 report
+(`.superpowers/sdd/2026-09-30-instant-imap/task-10-report.md`).
+
+### Round trips before the list redraws (by construction, not measured)
+
+From the spec's "Round trips after" section — these follow directly from the
+Layer 1–4 design (pipelined SELECT, background connection, optimistic
+removal, per-folder cache), not from a timing run:
+
+| Action | Today | After | Perceived |
+|---|---|---|---|
+| Folder switch, seen before | 3 (+4 queued) | 0 (2 in background) | instant |
+| Folder switch, first time | 3 (+4 queued) | 2 (+1 on bg connection) | ~2 RTT |
+| Screen-in `I` on one row | ~10 | 0 (3 in background) | instant |
+| Delete/archive/move N rows | 2N + 7 | 0 (N in background) | instant |
+| Open email | 1–2 | 1–2 | unchanged |
+| Search across folders | 2 per folder | 1 per folder | halved |
+
+TUI-level felt-millisecond numbers (the `Action (demo-hp) | Before | After`
+table originally planned for this section) require driving the real bubbletea
+UI and are deferred to the user's production soak (plan Task 10 step 8); this
+environment has no TTY to run `make demo-hp` interactively.
+
 ---
 
 ### Task 10: Docs, after-numbers, final verification

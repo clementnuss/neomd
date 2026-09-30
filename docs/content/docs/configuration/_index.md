@@ -86,6 +86,7 @@ inbox_count          = 200      # how many newest emails neomd loads per folder/
 auto_screen_on_load  = true     # screen inbox automatically on every load (default true)
 bg_sync_interval     = 5        # background sync interval in minutes; 0 = disabled (default 5)
 bulk_progress_threshold = 10    # show progress counter for batch operations larger than this (default 10)
+instant_folder_switch = true    # show the last-seen list at once on Tab and refresh behind it (↻); false = spinner on every switch
 draft_backup_count      = 20    # rolling compose backups in ~/.cache/neomd/drafts/ (default 20, -1 = disabled)
 mark_as_read_after_secs = 7     # seconds in reader before marking as read; 0 = immediate (default 7)
 signature   = """**Your Name**
@@ -104,6 +105,10 @@ Connect: [LinkedIn](https://example.com/)
 Use an app-specific password (Gmail, Fastmail, Hostpoint, etc.) rather than your main account password.
 
 `inbox_count` is a fetch cap for normal folder loads and startup auto-screening. If you want to re-screen the entire Inbox on the IMAP server, use `:screen-all` from inside neomd; that scans every Inbox email, not just the loaded subset, and can take a while on large mailboxes.
+
+With `instant_folder_switch = true` (the default), switching tabs shows the last list you saw for that folder immediately and refreshes it behind the scenes (`↻` next to the tabs while that fetch is in flight); folder switches, deletes/archives/moves and screening also update the visible list right away instead of showing a spinner while the server call runs. Set it to `false` to go back to a spinner on every folder switch — the underlying IMAP round-trip reductions (pipelined SELECT, a background connection for tab counts/sync, MOVE without a forced re-SELECT) stay in effect either way.
+
+Set `NEOMD_IMAP_TRACE=1` in the environment before launching neomd (`NEOMD_IMAP_TRACE=1 neomd`) to append one line per IMAP operation — timestamp, operation, milliseconds — to `~/.cache/neomd/imap-trace.log`. It's off by default (no file, no cost) and is the first thing to check for a "neomd feels slow" report: the number of trace lines per keypress is the round-trip count for that action.
 
 
 

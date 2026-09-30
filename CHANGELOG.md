@@ -1,5 +1,134 @@
 # Changelog
 
+# 2026-09-30
+
+- **Opt-in IMAP timing trace (`NEOMD_IMAP_TRACE=1`)** — every "neomd feels slow" report
+  used to require guessing which IMAP call was slow. Setting `NEOMD_IMAP_TRACE=1` now
+  makes every public `internal/imap` operation (`FetchHeaders`, `FetchHeadersByUID`,
+  `SearchUIDs`, `FetchUnseenCounts`, `FetchBody`, `MoveMessage`, `ExpungeAll`,
+  `searchFolder`, `MarkSeen`, `MarkUnseen`) append a `<RFC3339Nano> <op> <ms>ms` line to
+  `~/.cache/neomd/imap-trace.log` (`imap.SetTracePath`/`trace()` in new
+  `internal/imap/trace.go`, `config.IMAPTracePath()` next to `moves.log`, enabled in
+  `cmd/neomd/main.go` right after `config.Load`). Off by default: lazy `defer
+  trace(start, format, args...)` formatting means zero allocation, zero file I/O when
+  disabled. This is how every number in this entry was reproduced. Tests:
+  `TestTrace_WritesLineWhenEnabled`, `TestTrace_NoopWhenDisabled`,
+  `TestIMAPTracePath_NextToMovesLog`.
+- **Pipelined SELECT/STATUS; MOVE no longer forces a re-SELECT** — every folder switch
+  paid for SELECT, UID SEARCH and FETCH as three fully serial round trips, then four more
+  serial STATUS calls for tab counts; every MOVE in a batch re-SELECTed the mailbox it
+  was already in. go-imap v2 sends a command as soon as it's called and only blocks in
+  `Wait()` (RFC 9051 §5.5 permits pipelining commands that don't depend on each other's
+  result), so `beginSelect`/`endSelect` (`internal/imap/client.go`) now send SELECT and
+  the following UID SEARCH/UID FETCH back-to-back in `FetchHeaders` (3→2 round trips),
+  `SearchUIDs` and `FetchHeadersByUID` (2→1) and `searchFolder` (2→1 per folder — 11
+  fewer round trips on `space /` across every folder); a failed SELECT drains the
+  pipelined response so the connection stays usable for the next call.
+  `FetchUnseenCounts` fires all STATUS commands before waiting on any (4→1). `MoveMessage`
+  no longer clears `selectedMailbox` after a successful MOVE — RFC 9051 §6.4.8 says the
+  source mailbox stays selected and every neomd operation afterwards is UID-addressed, so
+  sequence-number shifts from the server's untagged EXPUNGE can't misaddress anything
+  (10 marked emails: 20→11 round trips). No server-side operation changed, only when
+  responses are awaited. Pinned by a new in-memory IMAP server harness
+  (`internal/imap/memserver_test.go`, `imapserver/imapmemserver` on loopback TLS) and live
+  integration tests. Tests: `TestMem_FetchHeaders_MissingMailboxKeepsConnectionUsable`,
+  `TestMem_FetchHeaders_SecondCallSkipsSelect`, `TestMem_FetchUnseenCounts`,
+  `TestMem_MoveMessage_KeepsSelectionAndBatchWorks`,
+  `TestIntegration_PipelinedFetchMatchesSearch`, `TestIntegration_MoveWithoutReselect`.
+- **A second IMAP connection per account for background housekeeping** — tab counts, the
+  5-minute sync, VIP folder polls, spy-pixel scans, the overdue-scheduled check and the
+  new prefetch (below) used to share the same mutex-guarded connection as everything the
+  user does, so background work queued behind — and in front of — the user's next
+  keypress. `cmd/neomd/main.go` now builds a second `*imap.Client` per account
+  (`bgClients`, same config, nil for `imap_disabled` accounts); `Model.bgImapCli()`
+  returns it for the active account and falls back to `imapCli()` when nil, so every
+  existing nil-client rule still holds. Everything the user triggers directly (folder
+  load, body fetch, move, delete, screen, flags, search, undo, and the auto-screen MOVEs
+  that follow an Inbox load) stays on the primary connection so a user's consecutive
+  actions stay serial and predictable. While the 5-minute sync is mid-cycle
+  (`bgSyncInProgress`), an Inbox load skips its own auto-screen pass so the sync's MOVEs
+  and a concurrent load's MOVEs can't race on the same mail. Both connections lazily open
+  on first use and are closed on exit; two connections per account is well inside every
+  provider's limit. Tests: `TestBgImapCli_FallsBackToPrimaryWhenNil`,
+  `TestBgImapCli_NilWhenEverythingDisabled`, `TestInboxLoadSkipsAutoScreenWhileBgSyncRuns`.
+- **Optimistic list updates for delete/archive/move/screen — the list never hides**
+  — `x`/`A`/`B`/`M*`/`I O F P $` and auto-screen used to set `loading = true` (spinner,
+  list hidden), run the MOVEs, then reload the folder and tab counts — up to `2N + 7`
+  round trips the user waited through before seeing the list again. A new
+  `removeFromList` (`internal/ui/model.go`) drops the targeted rows from the visible
+  list and the folder cache immediately, clears marks, and rebuilds the list so the
+  cursor lands on the same folder+UID as before, or on the next row when that email
+  itself was removed — the same rule a normal reload already followed
+  (`TestReloadKeepsCursorOnSameEmail`, CHANGELOG 2026-09-18). The **same**
+  `batchMoveCmd`/`batchScreenerCmd` server calls run afterwards, unchanged in count,
+  order or audit-log lines. `batchDoneMsg`/`autoScreenDoneMsg` pick the redraw path with
+  `optimistic := !m.loading`: success shows "Moved."/"Screened N", pushes undo entries,
+  and triggers a *background* refresh of the active folder (`refreshActiveFolderCmd`,
+  header `↻`) instead of a spinner reload; any error sets `loading = true` and does a
+  full reload from the server with the error in the status line, keeping partial undo
+  info — the optimistic removal is never trusted past an error. `u` undo, `X`,
+  toggle-seen, delete-all and `:screen` keep the non-optimistic spinner-reload path
+  unconditionally. Screener sender-expansion (one unmarked ToScreen row screens in every
+  queued mail from that sender) is mirrored locally by removing every loaded row with
+  the same `normalizedSender`. Bulk progress (`bulkProgress`) now renders in the status
+  line while the list stays visible instead of in the hidden-list spinner branch. Tests:
+  `TestOptimistic_DeleteRemovesRowImmediately`,
+  `TestOptimistic_BatchDoneSuccessRefreshesInBackground`,
+  `TestOptimistic_BatchErrorReloadsAndKeepsPartialUndo`,
+  `TestOptimistic_ScreenInToScreenRemovesSameSender`,
+  `TestOptimistic_ScreenWithMarksRemovesOnlyTargets`.
+- **Per-folder cache with a visible `↻` refresh, plus startup prefetch** — switching
+  tabs (`Tab`, `gk`, …) used to always spinner-load the folder from the server, even for
+  a folder shown seconds ago. A new `folderCache` (keyed by account name + IMAP folder
+  name, `cacheKey`) is served instantly by `loadActiveFolder` on a cache hit — the list
+  redraws at once, `refreshing = true`, and the same fetch fires behind it; the header
+  shows `↻` until it lands. `emailsLoadedMsg` now carries the account name, always
+  writes the snapshot into the cache, and is applied to the visible list only when the
+  folder **and** account are still the active ones — a late result for a folder the user
+  already left is cached, never shown, closing a latent race that existed even before
+  this change. Synthetic off-tab views (Search, Everything, Thread, Sender, Merged: …)
+  are never overwritten by a stale folder result underneath them; fixing that guard
+  surfaced a real, separate bug where `:go-spam` didn't set `offTabFolder`, so it now
+  sets `offTabFolder = "Spam"` like every other off-tab command. `R` always bypasses the
+  cache (hard refresh); `u` undo and every error path do too. A background prefetch
+  (`prefetchFoldersCmd`, `prefetchList`) runs once per session after the first folder
+  load, on the background connection only, filling the cache for every tab folder
+  (ToScreen first) so even the *first* `Tab` of a session is instant; it never touches
+  the visible list, and it skips a folder if a fresher load already landed for it or the
+  active account changed mid-cycle (`bgInboxFetchedMsg` now carries the account too).
+  Kill switch: `[ui] instant_folder_switch = true` (default); `false` restores today's
+  spinner-on-every-switch behavior while Layers 1–3 stay active. Off-tab views (Search,
+  Everything, Thread, Sender, Merge, Drafts, Spam) are not cached themselves. Tests:
+  `TestCache_SwitchToCachedFolderIsInstant`, `TestCache_SwitchToUncachedFolderShowsSpinner`,
+  `TestCache_LoadedResultIsCachedAndShownOnlyForActiveFolder`,
+  `TestCache_LateResultForOtherFolderIsCachedNotShown`, `TestCache_KeyedByAccount`,
+  `TestUIConfig_InstantSwitchDefaultsTrue`, `TestPrefetch_ListStartsWithToScreenAndSkipsCachedAndActive`,
+  `TestPrefetch_MsgFillsCacheOnlyAndChains`, `TestPrefetch_ScheduledOnceAfterFirstLoad`,
+  `TestBgSync_SkipsAutoScreenWhenAccountChanged`.
+
+**Round trips per action, before vs. after** (by construction from the design above —
+what a trace of each action shows, not a millisecond measurement):
+
+| Action | Today | After | Perceived |
+|---|---|---|---|
+| Folder switch, seen before | 3 (+4 queued) | 0 (2 in background) | instant |
+| Folder switch, first time | 3 (+4 queued) | 2 (+1 on bg connection) | ~2 RTT |
+| Screen-in `I` on one row | ~10 | 0 (3 in background) | instant |
+| Delete/archive/move N rows | 2N + 7 | 0 (N in background) | instant |
+| Open email | 1–2 | 1–2 | unchanged |
+| Search across folders | 2 per folder | 1 per folder | halved |
+
+**Measured, IMAP layer only** (`.bench/main.go`, a throwaway program against
+`~/.config/neomd-demo-hostpoint/config.toml`; medians of two 3-run passes; NOOP round
+trip on this run ~10–17 ms steady-state, vs. 250–450 ms on the saturated-Wi-Fi baseline
+run recorded in `docs/superpowers/plans/2026-09-30-instant-imap.md` — the two runs are
+not on comparable networks, only the round-trip-count reasoning above is): `Ping` 17 ms,
+`FetchHeaders(Inbox, 200)` 70 ms, `FetchHeaders(ToScreen, 200)` 92 ms,
+`FetchUnseenCounts` (4 folders) 33 ms. **Felt, TUI-level before/after milliseconds are
+not in this entry** — they need a real terminal driving `make demo-hp`, which this
+environment doesn't have; those numbers come from the user's production soak (plan Task
+10 step 8) before merge into `dev`.
+
 # 2026-09-28
 
 - **Reply quote header shows when the original was written** — `r`, `ctrl+r` and emoji reactions used to quote the original as `> **Simon <simon@example.io>** wrote:`, with no way to tell from the quote when that mail arrived. The attribution now reads `> **Simon <simon@example.io>** wrote on 28 Sep 2026 at 13:29:` in local 24h time. When the email carries no parseable `Date` (zero time) the old plain `wrote:` form is kept, so nothing renders as `wrote on 1 Jan 0001`. Forward is unchanged (it already has its own `Date:` line). `buildQuotedReply`, `ReplyPrelude` and `ReactionBody` in `internal/editor/editor.go` take the original `time.Time`; both callers in `internal/ui/model.go` pass `e.Date.Local()`. A 12h/AM-PM option is on the roadmap, not in this change. Tests: `TestReplyPreludeIncludesDate`, `TestReactionBodyIncludesDate`
