@@ -273,6 +273,7 @@ type UIConfig struct {
 	BulkProgressThreshold int             `toml:"bulk_progress_threshold"` // show progress counter for batches larger than this (default 10)
 	DraftBackupCount      int             `toml:"draft_backup_count"`      // rolling compose backups in ~/.cache/neomd/drafts/ (default 20, -1 = disabled)
 	MarkAsReadAfterSecs   int             `toml:"mark_as_read_after_secs"` // seconds in reader before marking as read (0 = immediate, default 7)
+	InstantFolderSwitch   *bool           `toml:"instant_folder_switch"`   // show the last-seen list at once and refresh behind it (default true)
 }
 
 // DraftBackups returns the max number of rolling draft backups (default 20, -1 = disabled).
@@ -289,6 +290,15 @@ func (u UIConfig) BulkThreshold() int {
 		return 10
 	}
 	return u.BulkProgressThreshold
+}
+
+// InstantSwitch reports whether folder switches show the cached list first
+// (default true). false restores the spinner-on-every-switch behavior.
+func (u UIConfig) InstantSwitch() bool {
+	if u.InstantFolderSwitch == nil {
+		return true
+	}
+	return *u.InstantFolderSwitch
 }
 
 // AutoScreen returns true if auto-screen-on-inbox-load is enabled (default: true).
@@ -391,13 +401,13 @@ type Config struct {
 // Only the headless daemon acts on it; the TUI ignores this block.
 type OOOConfig struct {
 	Enabled  bool     `toml:"enabled"`
-	Accounts []string `toml:"accounts"` // [[accounts]] names whose inboxes get auto-replies, each from its own address (e.g. ["Work", "WorkInfo"]); empty = the daemon's own account
-	Timezone string   `toml:"timezone"` // IANA name (e.g. "Europe/Zurich") that from/until are interpreted in; empty = the daemon machine's local time
-	From     string `toml:"from"`      // "YYYY-MM-DD" — active starting at 00:00 of this day (local time); empty = active immediately
-	Until    string `toml:"until"`     // "YYYY-MM-DD" — active through the END of this day (local time); empty = active until enabled=false
-	Subject  string `toml:"subject"`   // reply subject; default "Out of Office"
-	Body     string `toml:"body"`      // reply body in markdown (same rendering as composed emails)
-	BodyFile string `toml:"body_file"` // optional path to a markdown file; overrides body when set
+	Accounts []string `toml:"accounts"`  // [[accounts]] names whose inboxes get auto-replies, each from its own address (e.g. ["Work", "WorkInfo"]); empty = the daemon's own account
+	Timezone string   `toml:"timezone"`  // IANA name (e.g. "Europe/Zurich") that from/until are interpreted in; empty = the daemon machine's local time
+	From     string   `toml:"from"`      // "YYYY-MM-DD" — active starting at 00:00 of this day (local time); empty = active immediately
+	Until    string   `toml:"until"`     // "YYYY-MM-DD" — active through the END of this day (local time); empty = active until enabled=false
+	Subject  string   `toml:"subject"`   // reply subject; default "Out of Office"
+	Body     string   `toml:"body"`      // reply body in markdown (same rendering as composed emails)
+	BodyFile string   `toml:"body_file"` // optional path to a markdown file; overrides body when set
 }
 
 // ListmonkTrigger maps a virtual email address to Listmonk list IDs.
@@ -479,6 +489,17 @@ func AuditLogPath() string {
 		return filepath.Join(p, "moves.log")
 	}
 	return filepath.Join(os.TempDir(), fmt.Sprintf("neomd_%d_moves.log", os.Getuid()))
+}
+
+// IMAPTracePath returns ~/.cache/neomd/imap-trace.log, the opt-in
+// (NEOMD_IMAP_TRACE=1) per-operation timing log. Same directory as moves.log.
+func IMAPTracePath() string {
+	if dir, err := os.UserCacheDir(); err == nil {
+		p := filepath.Join(dir, cacheDirName)
+		_ = os.MkdirAll(p, 0o700)
+		return filepath.Join(p, "imap-trace.log")
+	}
+	return filepath.Join(os.TempDir(), fmt.Sprintf("neomd_%d_imap-trace.log", os.Getuid()))
 }
 
 // InlineImageDir returns ~/.cache/neomd/inline/, creating it if needed. Reply

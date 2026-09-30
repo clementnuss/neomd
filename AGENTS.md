@@ -383,6 +383,53 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   break comma-splitting fall back to the bare address. Tests:
   `TestFormatEnvelopeAddr`, `TestExpandSearchQueries`,
   `TestContactNamesForResolvesBareAddresses`.
+- **Optimistic removal is never trusted past an error** — `x`/`A`/`B`/`M*`/`I O F P $`
+  and auto-screen drop rows via `removeFromList` (`internal/ui/model.go`) before the
+  MOVE runs; `removeFromList` rebuilds the list so the cursor lands on the same
+  folder+UID as before the removal, or on the next row when that email itself was
+  removed — exactly as a normal reload does. `batchDoneMsg`/`autoScreenDoneMsg` pick
+  the redraw path with `optimistic := !m.loading`: success ends in a background
+  refresh (`refreshActiveFolderCmd`, header `↻`), any error ends in `loading = true` +
+  full reload with the error in the status line and partial undo kept. `u` undo, `X`,
+  toggle-seen, delete-all and `:screen` always take the non-optimistic spinner-reload
+  path. Server calls, order and audit lines are unchanged. On error the source folders'
+  snapshots are dropped (they were trimmed optimistically), and a synthetic view (Search,
+  Thread, …) is left via `leaveSyntheticView` so the tab-folder reload is applied.
+  Tests: `TestOptimistic_*`, `TestOptimistic_ErrorDropsOriginFolderCache`,
+  `TestOptimistic_ErrorInSearchViewReloadsTabFolder`.
+- **A removed row stays removed until its MOVE finished** — `removeFromList` records
+  each target in `pendingRemoval` (account+folder+UID); `optimisticRemove` tags the MOVE
+  command's `batchDoneMsg`/`autoScreenDoneMsg` with those keys (`releaseOnDone`) and the
+  handlers release exactly them, on success and on error. Until then `emailsLoadedMsg`
+  and `bgInboxFetchedMsg` filter those rows out of every fetch result (`withoutPending`)
+  before caching or showing it, so a refresh that started before the MOVE cannot
+  resurface them. Every `removeFromList` must go through `optimisticRemove` with a
+  command that ends in one of those two messages, or its rows stay hidden. Tests:
+  `TestOptimistic_LateRefreshDoesNotResurfaceRemovedRow`,
+  `TestOptimistic_ErrorReleasesPendingRemoval`.
+- **A background refresh keeps marks and the `/` filter** — when `emailsLoadedMsg` lands
+  while `refreshing` (list visible, no spinner), marks survive for UIDs still in the
+  result and the filter text stays; a spinner reload clears both as before. Test:
+  `TestCache_BackgroundRefreshKeepsMarksAndFilter`.
+- **A cached list is only shown with `↻` and a fetch in flight** — `loadActiveFolder`
+  serves `folderCache[account+folder]` on tab switches (`[ui].instant_folder_switch`,
+  default true); `emailsLoadedMsg` always caches and applies to the visible list only
+  when folder AND account are still active (late results for another folder are cached,
+  not shown). Synthetic off-tab views (Search, Everything, Thread, Sender, Merged: …)
+  are never overwritten by a stale folder result — `emailsLoadedMsg` only clears
+  `loading`/`refreshing` for them and leaves `m.emails` alone; Drafts and Spam are
+  exempt from that guard since they map to a real cached folder (`:go-spam` was fixed
+  to set `offTabFolder = "Spam"` so it participates correctly — a latent bug the guard
+  surfaced). `R` bypasses the cache. Prefetch (`folderPrefetchedMsg`) fills the cache
+  only. Account switch (`ctrl+a`), tab keys, `<space>N`, `g<x>` and tab clicks all leave
+  a synthetic view (`leaveSyntheticView`: `offTabFolder`, `imapSearchResults`,
+  `imapSearchText`); `ctrl+a` also resets `prefetched` so the new account's tabs are
+  warmed. A failed folder fetch (`folderErrMsg`, carries folder+account) for the visible
+  folder after a spinner switch shows that folder's snapshot or an empty list — never
+  the previous folder's rows; failures for another folder/account are ignored. Tests:
+  `TestCache_*`, `TestPrefetch_*`, `TestBgSync_SkipsAutoScreenWhenAccountChanged`,
+  `TestCache_AccountSwitchLeavesSyntheticView`, `TestCache_AccountSwitchCapturesNewAccount`,
+  `TestCache_FolderFetchErrorClearsPreviousFolderRows`.
 - **The user's `[contacts]` file is read-only** — `contacts.MergeFile` only reads;
   neomd persists exclusively to its own cache (`config.ContactsCachePath()`), so the
   cache can be deleted anytime and rebuilds from harvesting + the file. The picker
@@ -462,6 +509,37 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   ISO-8859-1 and Outlook's `=?Windows-1252?Q?...?=` names leak raw into the inbox, reader
   and reply screens. Tests: `TestEnvelopeWordDecoder_DecodesWindows1252`,
   `TestClientOptions_SetWordDecoder`.
+- **SELECT is pipelined with the first command; MOVE keeps the mailbox selected** —
+  `beginSelect`/`endSelect` (`internal/imap/client.go`) send SELECT and the following
+  UID SEARCH / UID FETCH back-to-back (RFC 9051 §5.5); a failed SELECT drains the
+  pipelined response and the connection stays usable. `FetchUnseenCounts` sends all
+  STATUS commands before waiting. `MoveMessage` no longer clears `selectedMailbox`
+  (RFC 9051 §6.4.8: the source stays selected; every later op is UID-addressed).
+  Never reintroduce a per-command SELECT. Tests: `TestMem_FetchHeaders_*`,
+  `TestMem_FetchUnseenCounts`, `TestMem_MoveMessage_KeepsSelectionAndBatchWorks`,
+  `TestIntegration_MoveWithoutReselect`, `TestIntegration_PipelinedFetchMatchesSearch`.
+- **Background connection is never used for user actions** — `bgImapCli()` serves
+  tab counts, the 5-minute sync, VIP polls, spy scan, overdue check and prefetch;
+  folder loads, body fetches, moves, screening, flags, search, undo and the
+  auto-screen MOVEs after an Inbox load stay on `imapCli()` so a user's consecutive
+  actions are serial. Falls back to the primary when nil. While `bgSyncInProgress`
+  an Inbox load skips its own auto-screen pass. Tests: `TestBgImapCli_*`,
+  `TestInboxLoadSkipsAutoScreenWhileBgSyncRuns`.
+- **Background goroutines never hold pointers into `m.emails` or a `folderCache`
+  snapshot** — the UI re-sorts both in place (a cache-hit Tab sorts the snapshot it
+  serves). MOVE plans capture UIDs by value at command construction
+  (`execAutoScreenCmd`/`bgExecAutoScreenCmd` via `autoScreenPlan`, `batchMoveCmd`), and
+  `bgInboxFetchedMsg` caches a copy of the fetched slice. Reading `mv.email.UID` inside
+  the goroutine moved the wrong message after a Tab (and was a data race). Tests:
+  `TestAutoScreenPlan_CapturesUIDsByValue`, `TestCache_BgInboxSnapshotIsACopy`
+  (`go test -race ./internal/ui`).
+- **A failed SELECT clears the cached selection** — `selectMailbox` resets
+  `selectedMailbox` on error (RFC 9051: a failed SELECT deselects). Test:
+  `TestMem_FailedSelectClearsCachedSelection`.
+- **`NEOMD_IMAP_TRACE=1`** appends `<time> <op> <ms>` per IMAP operation to
+  `~/.cache/neomd/imap-trace.log` (`imap.SetTracePath`, `config.IMAPTracePath`). First
+  stop for any "neomd feels slow" report; the number of lines per keypress is the
+  round-trip count. Tests: `TestTrace_*`, `TestIMAPTracePath_NextToMovesLog`.
 
 ## Notifications & Theming
 

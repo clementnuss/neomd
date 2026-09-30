@@ -53,8 +53,9 @@ const (
 // async message types
 type (
 	emailsLoadedMsg struct {
-		emails []imap.Email
-		folder string
+		emails  []imap.Email
+		folder  string
+		account string // account the fetch ran for; "" = active account
 	}
 	bodyLoadedMsg struct {
 		email       *imap.Email
@@ -74,8 +75,9 @@ type (
 	}
 	screenDoneMsg     struct{ err error }
 	autoScreenDoneMsg struct {
-		moved int
-		err   error
+		moved   int
+		err     error
+		removed []removalKey // optimistic rows this MOVE run covers (set by releaseOnDone)
 	}
 	deepScreenReadyMsg struct {
 		moves []autoScreenMove
@@ -121,8 +123,9 @@ type (
 		undo []undoMove
 	}
 	batchDoneMsg struct {
-		err  error
-		undo []undoMove
+		err     error
+		undo    []undoMove
+		removed []removalKey // optimistic rows this MOVE run covers (set by releaseOnDone)
 	}
 	undoDoneMsg       struct{}
 	toggleSeenDoneMsg struct {
@@ -131,10 +134,29 @@ type (
 		err  error
 	}
 	errMsg struct{ err error }
+	// folderErrMsg is fetchFolderCmd's failure: it names the folder and
+	// account so the handler can tell a stale failure from the visible one.
+	folderErrMsg struct {
+		folder  string
+		account string
+		err     error
+	}
 	// background sync (runs every bgSyncInterval while neomd is open)
 	bgSyncTickMsg     struct{}
-	bgInboxFetchedMsg struct{ emails []imap.Email }
-	bgScreenDoneMsg   struct{ moved, total int }
+	bgInboxFetchedMsg struct {
+		emails  []imap.Email
+		account string // account the fetch ran for (cache key)
+	}
+	bgScreenDoneMsg struct{ moved, total int }
+
+	// folderPrefetchedMsg carries one background-fetched folder for the cache
+	// only (never the visible list) and the folders still to prefetch.
+	folderPrefetchedMsg struct {
+		account   string
+		folder    string
+		emails    []imap.Email // nil on error; the folder simply stays uncached
+		remaining []string
+	}
 
 	// bgVipFolderFetchedMsg carries a non-Inbox folder fetch used purely to
 	// dispatch desktop notifications for VIP senders whose mail the daemon
@@ -530,6 +552,40 @@ type autoScreenMove struct {
 	dst   string
 }
 
+// screenMove is one MOVE of an auto-screen plan, captured by value.
+type screenMove struct {
+	uid uint32
+	dst string
+}
+
+// autoScreenPlan copies (uid, dst) out of moves at command construction.
+// The MOVEs run later on another goroutine; reading mv.email there would
+// follow a pointer into a slice the UI may re-sort in place meanwhile
+// (m.emails, a folderCache snapshot) and move the wrong message.
+func autoScreenPlan(moves []autoScreenMove) []screenMove {
+	plan := make([]screenMove, len(moves))
+	for i, mv := range moves {
+		plan[i] = screenMove{uid: mv.email.UID, dst: mv.dst}
+	}
+	return plan
+}
+
+// removalKey names one row removed optimistically whose MOVE is still in
+// flight: account + source folder + UID.
+type removalKey struct {
+	account string
+	folder  string
+	uid     uint32
+}
+
+// folderSnapshot is the last header list fetched for one account+folder.
+type folderSnapshot struct {
+	emails    []imap.Email
+	fetchedAt time.Time
+}
+
+func cacheKey(account, folder string) string { return account + "\x00" + folder }
+
 // pendingDomainAction queues a domain-level screener mutation awaiting y/n.
 // entry is the storage form ("@ssp.sh"); action is "I" (approve) or "O" (block).
 type pendingDomainAction struct {
@@ -542,15 +598,17 @@ type Model struct {
 	cfg         *config.Config
 	accounts    []config.AccountConfig // all configured accounts
 	clients     []*imap.Client         // one IMAP client per account
+	bgClients   []*imap.Client         // second connection per account for housekeeping (nil = share primary)
 	accountI    int                    // index of the active account
 	screener    *screener.Screener
 	notifier    *notify.Notifier
 	notifyState *notify.State
 
-	state   viewState
-	width   int
-	height  int
-	loading bool
+	state      viewState
+	width      int
+	height     int
+	loading    bool
+	refreshing bool // background re-fetch of the visible folder in flight (header shows ↻)
 
 	// Bulk operation progress — shared pointer, written by goroutines, read by view.
 	bulkProgress *bulkOp
@@ -564,6 +622,13 @@ type Model struct {
 	inbox   list.Model
 	emails  []imap.Email
 	spinner spinner.Model
+
+	folderCache map[string]folderSnapshot // last-seen list per account+folder; shown at once on switch with ↻ while re-fetching
+	prefetched  bool                      // startup prefetch already scheduled
+	// pendingRemoval holds rows removed optimistically whose MOVE has not
+	// finished; fetch results landing meanwhile are filtered so a stale
+	// refresh cannot resurface them. Released by batchDoneMsg/autoScreenDoneMsg.
+	pendingRemoval map[removalKey]bool
 
 	// Reader
 	reader          viewport.Model
@@ -809,6 +874,15 @@ func (m Model) activeAccount() config.AccountConfig {
 	return m.accounts[0]
 }
 
+// activeAccountName is activeAccount().Name, or "" when no account is
+// configured (folder cache key; "" in emailsLoadedMsg means "active").
+func (m Model) activeAccountName() string {
+	if len(m.accounts) == 0 {
+		return ""
+	}
+	return m.activeAccount().Name
+}
+
 // presendFroms returns all available From addresses: all accounts first (in
 // config order), then any [[senders]] aliases. This lets the user cycle to any
 // account's From address regardless of which account is currently active.
@@ -917,6 +991,24 @@ func (m Model) imapCli() *imap.Client {
 	return m.primaryIMAPClient()
 }
 
+// bgImapCli returns the background IMAP connection for the active account,
+// used for housekeeping that must never delay a user action (tab counts,
+// 5-minute sync, spy scan, prefetch). Falls back to imapCli() when no
+// background client exists, so every nil-client rule keeps holding.
+func (m Model) bgImapCli() *imap.Client {
+	if m.accountI < len(m.bgClients) && m.bgClients[m.accountI] != nil {
+		return m.bgClients[m.accountI]
+	}
+	return m.imapCli()
+}
+
+// WithBackgroundClients attaches one background IMAP client per account
+// (same order as clients; nil entries allowed).
+func (m Model) WithBackgroundClients(bg []*imap.Client) Model {
+	m.bgClients = bg
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.spinner.Tick,
@@ -958,6 +1050,9 @@ func countOverdueScheduled(emails []imap.Email, now time.Time) int {
 // email. Fetch errors are silent (network hiccups resolve on the next tick).
 func (m Model) checkOverdueScheduledCmd() tea.Cmd {
 	cli := m.sentDraftsIMAPClient()
+	if cli == m.imapCli() {
+		cli = m.bgImapCli()
+	}
 	folder := m.cfg.Folders.Scheduled
 	return func() tea.Msg {
 		if cli == nil || folder == "" {
@@ -1011,13 +1106,21 @@ func (m Model) activeFolder() string {
 
 // ── Commands ─────────────────────────────────────────────────────────────
 
+// fetchFolderMsgFor is the result shell of fetchFolderCmd: folder and
+// account are captured when the command is built, not when it returns.
+func (m Model) fetchFolderMsgFor(folder string) emailsLoadedMsg {
+	return emailsLoadedMsg{folder: folder, account: m.activeAccountName()}
+}
+
 func (m Model) fetchFolderCmd(folder string) tea.Cmd {
+	res := m.fetchFolderMsgFor(folder)
 	return func() tea.Msg {
 		emails, err := m.imapCli().FetchHeaders(nil, folder, m.cfg.UI.InboxCount)
 		if err != nil {
-			return errMsg{err}
+			return folderErrMsg{folder: res.folder, account: res.account, err: err}
 		}
-		return emailsLoadedMsg{emails: emails, folder: folder}
+		res.emails = emails
+		return res
 	}
 }
 
@@ -1532,6 +1635,197 @@ func (m *Model) reselectEmail(prev *imap.Email) {
 	}
 }
 
+// removeFromList drops targets (matched by folder+UID) from the visible list
+// and rebuilds it. If the cursor email survives, the cursor stays on it
+// (as reselectEmail does after a reload); if it was removed, the cursor
+// lands on the row that followed it, exactly as after today's post-move
+// reload. Marks are cleared as a reload would. It never touches the server:
+// the caller fires the same MOVE command as before, and any error there
+// ends in a full reload.
+func (m *Model) removeFromList(targets []imap.Email) tea.Cmd {
+	key := func(e imap.Email) string { return e.Folder + "\x00" + strconv.FormatUint(uint64(e.UID), 10) }
+	gone := make(map[string]bool, len(targets))
+	for _, e := range targets {
+		gone[key(e)] = true
+	}
+	if m.pendingRemoval == nil {
+		m.pendingRemoval = make(map[removalKey]bool)
+	}
+	for _, k := range m.removalKeys(targets) {
+		m.pendingRemoval[k] = true
+	}
+	prev := selectedEmail(m.inbox)
+	idx := m.inbox.Index()
+	above := 0 // removed rows above the cursor shift the next row up
+	for i, it := range m.inbox.Items() {
+		if i >= idx {
+			break
+		}
+		if e, ok := it.(emailItem); ok && gone[key(e.email)] {
+			above++
+		}
+	}
+	kept := m.emails[:0:0]
+	for _, e := range m.emails {
+		if !gone[key(e)] {
+			kept = append(kept, e)
+		}
+	}
+	m.emails = kept
+	if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), m.activeFolder())]; ok {
+		keptSnap := snap.emails[:0:0]
+		for _, e := range snap.emails {
+			if !gone[e.Folder+"\x00"+strconv.FormatUint(uint64(e.UID), 10)] {
+				keptSnap = append(keptSnap, e)
+			}
+		}
+		snap.emails = keptSnap
+		m.folderCache[cacheKey(m.activeAccountName(), m.activeFolder())] = snap
+	}
+	m.markedUIDs = make(map[uint32]bool)
+	cmd := m.sortEmails()
+	if prev != nil && !gone[key(*prev)] {
+		m.reselectEmail(prev)
+		return cmd
+	}
+	idx -= above
+	n := len(m.inbox.Items())
+	if idx >= n {
+		idx = n - 1
+	}
+	if idx < 0 {
+		idx = 0
+	}
+	if n > 0 {
+		m.inbox.Select(idx)
+	}
+	return cmd
+}
+
+// removalKeys names targets for pendingRemoval under the active account.
+func (m Model) removalKeys(targets []imap.Email) []removalKey {
+	acct := m.activeAccountName()
+	keys := make([]removalKey, len(targets))
+	for i, e := range targets {
+		keys[i] = removalKey{account: acct, folder: e.Folder, uid: e.UID}
+	}
+	return keys
+}
+
+// optimisticRemove drops targets from the list (removeFromList) and returns
+// the list command batched with move, whose done message is tagged with the
+// removed keys so its handler releases exactly those. move must end in
+// batchDoneMsg or autoScreenDoneMsg; build it before calling (it may read
+// the rows about to be removed).
+func (m *Model) optimisticRemove(targets []imap.Email, move tea.Cmd) tea.Cmd {
+	keys := m.removalKeys(targets)
+	listCmd := m.removeFromList(targets)
+	return tea.Batch(listCmd, releaseOnDone(keys, move))
+}
+
+// releaseOnDone tags the done message of an optimistic MOVE command with
+// the pendingRemoval keys it covers.
+func releaseOnDone(keys []removalKey, cmd tea.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		switch msg := cmd().(type) {
+		case batchDoneMsg:
+			msg.removed = keys
+			return msg
+		case autoScreenDoneMsg:
+			msg.removed = keys
+			return msg
+		default:
+			return msg
+		}
+	}
+}
+
+// releasePending ends the optimistic window for keys. On error it also
+// drops the source folders' snapshots: they were trimmed optimistically and
+// the server is the truth now, so the next switch must not serve them.
+func (m *Model) releasePending(keys []removalKey, failed bool) {
+	for _, k := range keys {
+		delete(m.pendingRemoval, k)
+		if failed {
+			delete(m.folderCache, cacheKey(k.account, k.folder))
+		}
+	}
+}
+
+// withoutPending filters rows whose optimistic MOVE is still in flight out of
+// a fetch result for account ("" = active). A fetch that started before the
+// MOVE still lists them; showing them would resurface a just-deleted row.
+func (m Model) withoutPending(account string, emails []imap.Email) []imap.Email {
+	if len(m.pendingRemoval) == 0 {
+		return emails
+	}
+	if account == "" {
+		account = m.activeAccountName()
+	}
+	out := make([]imap.Email, 0, len(emails))
+	for _, e := range emails {
+		if !m.pendingRemoval[removalKey{account: account, folder: e.Folder, uid: e.UID}] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// inSyntheticView reports an off-tab view whose rows are not one folder
+// (Search, Everything, Thread, Sender, Merged: …); activeFolder() maps it to
+// the tab underneath.
+func (m Model) inSyntheticView() bool {
+	return m.offTabFolder != "" && m.offTabFolder != "Spam" && m.offTabFolder != "Drafts"
+}
+
+// leaveSyntheticView drops the off-tab/search state, as esc does, so the
+// next load of the tab folder is applied to the visible list.
+func (m *Model) leaveSyntheticView() {
+	m.offTabFolder = ""
+	m.imapSearchResults = false
+	m.imapSearchText = ""
+}
+
+// sameSenderIn returns every loaded email from the same normalized sender
+// as e in folder — mirrors the ToScreen sender expansion batchScreenerCmd
+// performs on the server, so the list matches what the server will do.
+func (m Model) sameSenderIn(e imap.Email, folder string) []imap.Email {
+	s := normalizedSender(e.From)
+	var out []imap.Email
+	for _, x := range m.emails {
+		if x.Folder == folder && normalizedSender(x.From) == s {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// refreshActiveFolderCmd re-fetches the visible folder without hiding the
+// list: the cached rows stay, the header shows ↻ until emailsLoadedMsg.
+func (m *Model) refreshActiveFolderCmd() tea.Cmd {
+	m.refreshing = true
+	return m.fetchFolderCmd(m.activeFolder())
+}
+
+// loadActiveFolder is what every tab switch calls. With a cached snapshot
+// (and instant_folder_switch on) the list appears at once and the header
+// shows ↻ until the fresh fetch lands; otherwise the spinner path as before.
+func (m *Model) loadActiveFolder() tea.Cmd {
+	folder := m.activeFolder()
+	if m.cfg.UI.InstantSwitch() {
+		if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), folder)]; ok {
+			m.emails = snap.emails
+			m.markedUIDs = make(map[uint32]bool)
+			m.filterActive, m.filterText = false, ""
+			m.loading = false
+			listCmd := m.sortEmails()
+			return tea.Batch(listCmd, m.refreshActiveFolderCmd())
+		}
+	}
+	m.loading = true
+	return tea.Batch(m.spinner.Tick, m.fetchFolderCmd(folder))
+}
+
 // undoableMoves drops moves whose destination UID is unknown (the server sent
 // no UIDPLUS COPYUID). Undoing those would mean guessing a UID in the
 // destination folder and possibly moving an unrelated message.
@@ -1873,7 +2167,7 @@ func (m Model) deepScreenClassifyCmd(accumulated []imap.Email, remaining []uint3
 // and returns results via message for the Update loop to merge.
 func (m Model) spyScanCmd() tea.Cmd {
 	folder := m.activeFolder()
-	cli := m.imapCli()
+	cli := m.bgImapCli()
 	// Copy scanned set to avoid concurrent read.
 	alreadyScanned := make(map[string]bool, len(m.spyScannedKeys))
 	for k, v := range m.spyScannedKeys {
@@ -2009,7 +2303,7 @@ func (m Model) fetchFolderCountsCmd() tea.Cmd {
 		"Scheduled":  m.cfg.Folders.Scheduled,
 	}
 	return func() tea.Msg {
-		counts, _ := m.imapCli().FetchUnseenCounts(nil, folders)
+		counts, _ := m.bgImapCli().FetchUnseenCounts(nil, folders)
 		return folderCountsMsg{counts: counts}
 	}
 }
@@ -2039,15 +2333,66 @@ func (m Model) scheduleMarkAsReadTimer(uid uint32, folder string) tea.Cmd {
 // bgFetchInboxCmd silently fetches inbox headers for background screening.
 // Errors are swallowed — a transient network hiccup shouldn't disrupt the UI.
 func (m Model) bgFetchInboxCmd() tea.Cmd {
+	account := m.activeAccountName()
 	return func() tea.Msg {
-		m.imapCli().ResetMailboxSelection() // force fresh SELECT to see new messages
-		emails, err := m.imapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, m.cfg.UI.InboxCount)
+		m.bgImapCli().ResetMailboxSelection() // force fresh SELECT to see new messages
+		emails, err := m.bgImapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, m.cfg.UI.InboxCount)
 		if err != nil {
 			// Return nil to let the next scheduled tick retry naturally.
 			// Returning bgSyncTickMsg{} here creates an infinite loop on persistent errors!
-			return bgInboxFetchedMsg{emails: nil} // signal completion even on error
+			return bgInboxFetchedMsg{emails: nil, account: account} // signal completion even on error
 		}
-		return bgInboxFetchedMsg{emails: emails}
+		return bgInboxFetchedMsg{emails: emails, account: account}
+	}
+}
+
+// prefetchList returns the IMAP names of every tab folder that is neither
+// exclude nor already cached, ToScreen first (the most common first switch).
+func (m Model) prefetchList(exclude string) []string {
+	account := m.activeAccountName()
+	var out []string
+	add := func(f string) {
+		if f == "" || f == exclude {
+			return
+		}
+		if _, ok := m.folderCache[cacheKey(account, f)]; ok {
+			return
+		}
+		for _, x := range out {
+			if x == f {
+				return
+			}
+		}
+		out = append(out, f)
+	}
+	add(m.cfg.Folders.ToScreen)
+	for _, label := range m.folders {
+		add(folderLabelToIMAP(label, m.cfg.Folders))
+	}
+	return out
+}
+
+// prefetchFoldersCmd fetches remaining[0] on bgImapCli() and hands the rest
+// back through folderPrefetchedMsg so folders load one after another.
+// bgImapCli() falls back to the primary connection when the account has no
+// background client; then the prefetch shares it with user actions.
+func (m Model) prefetchFoldersCmd(remaining []string) tea.Cmd {
+	if len(remaining) == 0 {
+		return nil
+	}
+	cli := m.bgImapCli()
+	account := m.activeAccountName()
+	folder, rest := remaining[0], remaining[1:]
+	n := m.cfg.UI.InboxCount
+	return func() tea.Msg {
+		if cli == nil {
+			return folderPrefetchedMsg{account: account, folder: folder, remaining: rest}
+		}
+		emails, err := cli.FetchHeaders(nil, folder, n)
+		if err != nil {
+			return folderPrefetchedMsg{account: account, folder: folder, remaining: rest}
+		}
+		return folderPrefetchedMsg{account: account, folder: folder, emails: emails, remaining: rest}
 	}
 }
 
@@ -2057,7 +2402,7 @@ func (m Model) bgFetchInboxCmd() tea.Cmd {
 // no UI mutation beyond a brief status update.
 func (m Model) bgFetchVipFolderCmd(folder string) tea.Cmd {
 	return func() tea.Msg {
-		cli := m.imapCli()
+		cli := m.bgImapCli()
 		if cli == nil {
 			return bgVipFolderFetchedMsg{folder: folder, emails: nil}
 		}
@@ -2129,11 +2474,12 @@ func folderLabelToIMAP(label string, fc config.FoldersConfig) string {
 // bgExecAutoScreenCmd silently moves emails and returns bgScreenDoneMsg.
 func (m Model) bgExecAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
 	src := m.cfg.Folders.Inbox
-	total := len(moves)
+	plan := autoScreenPlan(moves) // by value: never read mv.email in the goroutine
+	total := len(plan)
 	return func() tea.Msg {
 		moved := 0
-		for _, mv := range moves {
-			if _, err := m.imapCli().MoveMessage(nil, src, mv.email.UID, mv.dst); err != nil {
+		for _, mv := range plan {
+			if _, err := m.bgImapCli().MoveMessage(nil, src, mv.uid, mv.dst); err != nil {
 				break
 			}
 			moved++
@@ -2146,16 +2492,17 @@ func (m Model) bgExecAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
 func (m Model) execAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
 	src := m.cfg.Folders.Inbox
 	bp := m.bulkProgress
+	plan := autoScreenPlan(moves) // by value: never read mv.email in the goroutine
 	return func() tea.Msg {
-		for i, mv := range moves {
-			if _, err := m.imapCli().MoveMessage(nil, src, mv.email.UID, mv.dst); err != nil {
+		for i, mv := range plan {
+			if _, err := m.imapCli().MoveMessage(nil, src, mv.uid, mv.dst); err != nil {
 				return autoScreenDoneMsg{moved: i, err: err}
 			}
 			if bp != nil {
 				bp.moved.Add(1)
 			}
 		}
-		return autoScreenDoneMsg{moved: len(moves)}
+		return autoScreenDoneMsg{moved: len(plan)}
 	}
 }
 
@@ -2213,10 +2560,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil // already on this tab
 					}
 					m.activeFolderI = z.folderIndex
-					m.offTabFolder = ""
-					m.imapSearchText = ""
-					m.loading = true
-					return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+					m.leaveSyntheticView()
+					return m, m.loadActiveFolder()
 				}
 			}
 		}
@@ -2243,14 +2588,54 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case emailsLoadedMsg:
+		msg.emails = m.withoutPending(msg.account, msg.emails)
+		if m.folderCache == nil {
+			m.folderCache = make(map[string]folderSnapshot)
+		}
+		m.folderCache[cacheKey(msg.account, msg.folder)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+		// Apply to the visible list only if the user is still on this folder
+		// of this account; a late result for another folder is cached only.
+		if msg.folder != m.activeFolder() || (msg.account != "" && msg.account != m.activeAccountName()) {
+			return m, nil
+		}
+		// Synthetic off-tab views (Search, Everything, Thread, Sender, Merged: …)
+		// map activeFolder() to the tab underneath; never overwrite their rows.
+		// End spinner/↻ though: R, undo and error reloads there wait on this.
+		if m.inSyntheticView() {
+			m.loading = false
+			m.refreshing = false
+			return m, nil
+		}
+		// Startup prefetch: after the first folder ever applies to the visible
+		// list, warm the cache for the other tab folders on the background
+		// connection so later switches are instant too.
+		var prefetchCmd tea.Cmd
+		if !m.prefetched && m.cfg.UI.InstantSwitch() {
+			m.prefetched = true
+			prefetchCmd = m.prefetchFoldersCmd(m.prefetchList(msg.folder))
+		}
+		// A background refresh (↻, list visible) keeps marks on rows that
+		// still exist and the / filter; a spinner reload starts clean.
+		background := m.refreshing && !m.loading
 		m.loading = false
+		m.refreshing = false
 		prevCursor := selectedEmail(m.inbox) // keep the cursor on the same email after reload
 		m.emails = msg.emails
 		m.harvestContacts(msg.emails)
 		m.applySenderRules(msg.emails)
-		m.markedUIDs = make(map[uint32]bool) // clear marks on folder reload
-		m.filterActive = false
-		m.filterText = ""
+		if background {
+			kept := make(map[uint32]bool, len(m.markedUIDs))
+			for _, e := range msg.emails {
+				if m.markedUIDs[e.UID] {
+					kept[e.UID] = true
+				}
+			}
+			m.markedUIDs = kept
+		} else {
+			m.markedUIDs = make(map[uint32]bool) // clear marks on folder reload
+			m.filterActive = false
+			m.filterText = ""
+		}
 		if m.status == "" && m.startupNotice != "" {
 			m.status = m.startupNotice
 			m.startupNotice = ""
@@ -2283,14 +2668,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = ""
 			m.isError = false
 			m.mailtoBody = mp.Body
-			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 		}
 
 		// First-run welcome: show a brief intro popup.
 		if config.IsFirstRun() {
 			config.MarkWelcomeShown()
 			m.state = stateWelcome
-			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 		}
 
 		// Auto-screen: silently apply screener moves on every inbox load.
@@ -2299,17 +2684,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Controlled by ui.auto_screen_on_load (default true).
 		// Skip when all screener lists are empty — otherwise every email would
 		// be moved to ToScreen on first run, confusing new users.
-		if msg.folder == m.cfg.Folders.Inbox && m.cfg.UI.AutoScreen() && !m.screener.IsEmpty() {
+		// Skip while the 5-minute sync is mid-cycle: its MOVEs run on the
+		// background connection and end with a refresh; a second MOVE for the
+		// same mail would fail with a server NO.
+		if msg.folder == m.cfg.Folders.Inbox && m.cfg.UI.AutoScreen() && !m.screener.IsEmpty() && !m.bgSyncInProgress {
 			if err := m.validateScreenerSafety(); err != nil {
 				m.status = err.Error()
 				m.isError = true
-				return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+				return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 			}
 			if moves := m.previewAutoScreen(); len(moves) > 0 {
 				m.maybeNotifyInbox(msg.folder, msg.emails, moves)
-				m.loading = true
 				m.bulkProgress = m.newBulkOp("Screening", len(moves))
-				return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), m.spinner.Tick, m.execAutoScreenCmd(moves))
+				moving := make([]imap.Email, len(moves))
+				for i, mv := range moves {
+					moving[i] = *mv.email
+				}
+				// Hidden before the first draw; MOVEs run behind it.
+				return m, tea.Batch(m.optimisticRemove(moving, m.execAutoScreenCmd(moves)), m.fetchFolderCountsCmd(), m.spinner.Tick, prefetchCmd)
 			}
 		}
 		// Notify on any folder load that matches the user's allowlist — not
@@ -2324,7 +2716,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cfg.Notifications.FolderAllowed(m.cfg.Folders.LabelFor(msg.folder)) {
 			m.maybeNotifyInbox(msg.folder, msg.emails, nil)
 		}
-		return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+		return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 
 	case folderCountsMsg:
 		m.folderCounts = msg.counts
@@ -2667,9 +3059,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleSenderResult(msg)
 
 	case batchDoneMsg:
+		// optimistic: the initiating key (x/A/B/M*/I/O/F/P/$) already removed
+		// the rows and kept the list visible. Handlers that still hide the
+		// list (U undo, X, toggle-seen, delete-all, …) keep the spinner reload.
+		optimistic := !m.loading
 		m.loading = false
 		m.bulkProgress = nil
 		m.markedUIDs = make(map[uint32]bool)
+		m.releasePending(msg.removed, msg.err != nil)
 		if msg.err != nil {
 			// Include partial undo info so user can reverse already-moved emails.
 			if len(msg.undo) > 0 {
@@ -2678,15 +3075,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.undoStack = m.undoStack[len(m.undoStack)-maxUndoStack:]
 				}
 			}
+			// The server is the source of truth after any failure: never trust
+			// the optimistic removal past an error — full reload. A synthetic
+			// view cannot be reloaded (its load result is dropped), so leave
+			// it and reload the tab folder underneath.
+			if m.inSyntheticView() {
+				m.leaveSyntheticView()
+			}
 			m.status = msg.err.Error()
 			m.isError = true
-			return m, nil
+			m.loading = true
+			return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
 		}
 		if len(msg.undo) > 0 {
 			m.undoStack = append(m.undoStack, msg.undo)
 			if len(m.undoStack) > maxUndoStack {
 				m.undoStack = m.undoStack[len(m.undoStack)-maxUndoStack:]
 			}
+		}
+		if optimistic {
+			m.status = "Moved."
+			m.isError = false
+			return m, m.refreshActiveFolderCmd()
 		}
 		m.status = "Done."
 		m.loading = true
@@ -2834,15 +3244,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case autoScreenDoneMsg:
+		// optimistic: the Inbox-load auto-screen already removed the rows.
+		// The y-confirmed :screen / S path still hides the list and keeps
+		// the spinner reload.
+		optimistic := !m.loading
 		m.loading = false
 		m.bulkProgress = nil
+		m.releasePending(msg.removed, msg.err != nil)
 		if msg.err != nil {
+			if m.inSyntheticView() { // see batchDoneMsg
+				m.leaveSyntheticView()
+			}
 			m.status = fmt.Sprintf("Screening stopped after %d: %s", msg.moved, msg.err)
 			m.isError = true
-			return m, nil
+			m.loading = true
+			return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
 		}
 		m.status = fmt.Sprintf("Screened %d email(s).", msg.moved)
 		m.isError = false
+		if optimistic {
+			return m, m.refreshActiveFolderCmd()
+		}
 		m.loading = true
 		return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
 
@@ -2869,6 +3291,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bgSyncInProgress = false
 			return m, nil
 		}
+		if m.folderCache == nil {
+			m.folderCache = make(map[string]folderSnapshot)
+		}
+		msg.emails = m.withoutPending(msg.account, msg.emails)
+		// Cache a copy: a cache-hit Tab sorts the snapshot in place, and the
+		// screener below classifies msg.emails.
+		m.folderCache[cacheKey(msg.account, m.cfg.Folders.Inbox)] = folderSnapshot{emails: append([]imap.Email(nil), msg.emails...), fetchedAt: time.Now()}
+		// The UIDs belong to msg.account; the MOVEs below would run on the
+		// account active now. If the user switched accounts mid-sync, skip
+		// this cycle — the next tick re-fetches for the new account.
+		if msg.account != "" && msg.account != m.activeAccountName() {
+			m.bgSyncInProgress = false
+			return m, nil
+		}
 		if err := m.validateScreenerSafety(); err != nil {
 			m.status = err.Error()
 			m.isError = true
@@ -2884,6 +3320,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// bgSyncInProgress stays set - will be cleared in bgScreenDoneMsg
 		return m, m.bgExecAutoScreenCmd(moves)
+
+	case folderPrefetchedMsg:
+		if msg.emails != nil {
+			if m.folderCache == nil {
+				m.folderCache = make(map[string]folderSnapshot)
+			}
+			if _, already := m.folderCache[cacheKey(msg.account, msg.folder)]; !already {
+				m.folderCache[cacheKey(msg.account, msg.folder)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+			}
+		}
+		return m, m.prefetchFoldersCmd(msg.remaining)
 
 	case bgVipFolderFetchedMsg:
 		if msg.emails == nil {
@@ -2901,15 +3348,38 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.isError = true
 			}
 			// Refresh the visible folder so the user sees the clean result.
-			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+			return m, m.refreshActiveFolderCmd()
 		}
 		return m, nil
 
 	case errMsg:
 		m.loading = false
+		m.refreshing = false
 		m.status = msg.err.Error()
 		m.isError = true
+		return m, nil
+
+	case folderErrMsg:
+		// A failure for another folder/account is stale: the visible folder's
+		// own fetch owns the spinner/↻.
+		if msg.folder != m.activeFolder() || (msg.account != "" && msg.account != m.activeAccountName()) {
+			return m, nil
+		}
+		wasLoading := m.loading
+		m.loading = false
+		m.refreshing = false
+		m.status = msg.err.Error()
+		m.isError = true
+		if wasLoading && !m.inSyntheticView() {
+			// The rows behind the spinner may belong to the previous folder:
+			// show this folder's snapshot, or nothing.
+			m.emails = nil
+			if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), msg.folder)]; ok && m.cfg.UI.InstantSwitch() {
+				m.emails = snap.emails
+			}
+			m.markedUIDs = make(map[uint32]bool)
+			return m, m.sortEmails()
+		}
 		return m, nil
 
 	case editorDoneMsg:
@@ -3279,9 +3749,9 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(targets) == 0 {
 			return m, nil
 		}
-		m.loading = true
 		m.bulkProgress = m.newBulkOp("Deleting", len(targets))
-		return m, tea.Batch(m.spinner.Tick, m.batchMoveCmd(targets, m.cfg.Folders.Trash))
+		m.status, m.isError = "Deleting…", false
+		return m, tea.Batch(m.optimisticRemove(targets, m.batchMoveCmd(targets, m.cfg.Folders.Trash)), m.spinner.Tick)
 
 	case "X": // permanent delete (marked or cursor) — only in Trash
 		if m.activeFolder() != m.cfg.Folders.Trash {
@@ -3329,9 +3799,14 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(targets) == 0 {
 			return m, nil
 		}
-		m.loading = true
 		m.bulkProgress = m.newBulkOp("Screening", len(targets))
-		return m, tea.Batch(m.spinner.Tick, m.batchScreenerCmd(targets, key))
+		screenCmd := m.batchScreenerCmd(targets, key) // built BEFORE the list changes: it reads m.markedUIDs
+		toRemove := targets
+		if len(targets) == 1 && len(m.markedUIDs) == 0 && targets[0].Folder == m.cfg.Folders.ToScreen {
+			toRemove = m.sameSenderIn(targets[0], m.cfg.Folders.ToScreen)
+		}
+		m.status, m.isError = "Screening…", false
+		return m, tea.Batch(m.optimisticRemove(toRemove, screenCmd), m.spinner.Tick)
 
 	// A = archive (pure move, no screener update)
 	case "A":
@@ -3339,9 +3814,9 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(targets) == 0 {
 			return m, nil
 		}
-		m.loading = true
 		m.bulkProgress = m.newBulkOp("Archiving", len(targets))
-		return m, tea.Batch(m.spinner.Tick, m.batchMoveCmd(targets, m.cfg.Folders.Archive))
+		m.status, m.isError = "Archiving…", false
+		return m, tea.Batch(m.optimisticRemove(targets, m.batchMoveCmd(targets, m.cfg.Folders.Archive)), m.spinner.Tick)
 
 	// B = move to Work/Business (pure move, no screener update)
 	case "B":
@@ -3354,9 +3829,9 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if len(targets) == 0 {
 			return m, nil
 		}
-		m.loading = true
 		m.bulkProgress = m.newBulkOp("Moving to Work", len(targets))
-		return m, tea.Batch(m.spinner.Tick, m.batchMoveCmd(targets, m.cfg.Folders.Work))
+		m.status, m.isError = "Moving…", false
+		return m, tea.Batch(m.optimisticRemove(targets, m.batchMoveCmd(targets, m.cfg.Folders.Work)), m.spinner.Tick)
 
 	// ── Auto-screen dry-run (Inbox only) ────────────────────────────
 	case ":":
@@ -3498,16 +3973,14 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.offTabFolder = ""
 		m.imapSearchResults = false
 		m.imapSearchText = ""
-		m.loading = true
-		return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+		return m, m.loadActiveFolder()
 
 	case "shift+tab", "H", "[":
 		m.activeFolderI = (m.activeFolderI - 1 + len(m.folders)) % len(m.folders)
 		m.offTabFolder = ""
 		m.imapSearchResults = false
 		m.imapSearchText = ""
-		m.loading = true
-		return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+		return m, m.loadActiveFolder()
 
 	case "G":
 		m.inbox.Select(len(m.inbox.Items()) - 1)
@@ -3565,8 +4038,9 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.activeFolderI = 0
-			m.loading = true
-			return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+			m.leaveSyntheticView()
+			m.prefetched = false // warm the new account's tabs too
+			return m, m.loadActiveFolder()
 		}
 
 	case "c":
@@ -3924,9 +4398,8 @@ func (m Model) handleChord(prefix, key string) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.activeFolderI = idx
-				m.offTabFolder = ""
-				m.loading = true
-				return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+				m.leaveSyntheticView()
+				return m, m.loadActiveFolder()
 			}
 		}
 		if key != "esc" {
@@ -3978,10 +4451,8 @@ func (m Model) handleChord(prefix, key string) (tea.Model, tea.Cmd) {
 						return m, nil
 					}
 					m.activeFolderI = i
-					m.offTabFolder = ""
-					m.imapSearchText = ""
-					m.loading = true
-					return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
+					m.leaveSyntheticView()
+					return m, m.loadActiveFolder()
 				}
 			}
 		}
@@ -4010,9 +4481,9 @@ func (m Model) handleChord(prefix, key string) (tea.Model, tea.Cmd) {
 			dstMap["b"] = m.cfg.Folders.Work
 		}
 		if dst, ok := dstMap[key]; ok {
-			m.loading = true
 			m.bulkProgress = m.newBulkOp("Moving", len(targets))
-			return m, tea.Batch(m.spinner.Tick, m.batchMoveCmd(targets, dst))
+			m.status, m.isError = "Moving…", false
+			return m, tea.Batch(m.optimisticRemove(targets, m.batchMoveCmd(targets, dst)), m.spinner.Tick)
 		}
 		m.status = fmt.Sprintf("unknown: M%s", key)
 
@@ -6318,6 +6789,9 @@ func (m Model) viewInbox() string {
 	if len(m.markedUIDs) > 0 {
 		header += styleDate.Render(fmt.Sprintf("  [%d marked · U to clear]", len(m.markedUIDs)))
 	}
+	if m.refreshing {
+		header += styleDate.Render(" ↻")
+	}
 	b.WriteString(header + "\n")
 	b.WriteString(styleSeparator.Render(strings.Repeat("─", m.width)) + "\n")
 
@@ -6336,6 +6810,8 @@ func (m Model) viewInbox() string {
 	b.WriteString("\n")
 	if m.cmdMode {
 		b.WriteString(viewCmdLine(m.cmdText, m.width))
+	} else if bp := m.bulkProgress; bp != nil && !m.loading {
+		b.WriteString(statusBar(bp.String(), false))
 	} else if m.imapSearchActive || m.imapSearchResults {
 		b.WriteString(m.viewIMAPSearchBar())
 	} else if m.filterActive || m.filterText != "" {

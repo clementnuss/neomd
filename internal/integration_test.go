@@ -1190,3 +1190,86 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "…"
 }
+
+// TestIntegration_PipelinedFetchMatchesSearch pins that the pipelined
+// SELECT‖UID SEARCH path in FetchHeaders returns exactly the newest-n UID set
+// a serial SearchUIDs + FetchHeadersByUID sees on a real server.
+func TestIntegration_PipelinedFetchMatchesSearch(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	ctx := context.Background()
+	fast, err := cli.FetchHeaders(ctx, "INBOX", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uids, err := cli.SearchUIDs(ctx, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) > 50 {
+		uids = uids[len(uids)-50:]
+	}
+	slow, err := cli.FetchHeadersByUID(ctx, "INBOX", uids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fast) != len(slow) {
+		t.Fatalf("pipelined %d emails, serial %d", len(fast), len(slow))
+	}
+	for i := range fast { // fast is newest-first, slow ascending
+		if fast[i].UID != slow[len(slow)-1-i].UID || fast[i].Subject != slow[len(slow)-1-i].Subject {
+			t.Errorf("row %d differs: %d/%q vs %d/%q", i, fast[i].UID, fast[i].Subject, slow[len(slow)-1-i].UID, slow[len(slow)-1-i].Subject)
+		}
+	}
+	counts, err := cli.FetchUnseenCounts(ctx, map[string]string{"Inbox": "INBOX", "PaperTrail": "PaperTrail", "Waiting": "Waiting", "Scheduled": "Scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unseen := 0
+	for _, e := range slow {
+		if !e.Seen {
+			unseen++
+		}
+	}
+	if len(uids) <= 50 && counts["Inbox"] != unseen {
+		t.Errorf("STATUS unseen %d != counted %d", counts["Inbox"], unseen)
+	}
+}
+
+// TestIntegration_MoveWithoutReselect pins that a MOVE followed by a header
+// fetch on the same connection reflects the move on both sides without any
+// forced re-SELECT (MoveMessage no longer clears the selection cache).
+func TestIntegration_MoveWithoutReselect(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	testFolder := "NeomdTest"
+	if _, err := cli.EnsureFolders(context.Background(), []string{testFolder}); err != nil {
+		t.Fatalf("EnsureFolders: %v", err)
+	}
+	subject := uniqueSubject("move-noreselect")
+	if err := smtp.Send(env.smtpConfig(), env.user, "", "", subject, "moved without re-select", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	email := waitForEmail(t, cli, "INBOX", subject, 30*time.Second)
+	destUID, err := cli.MoveMessage(context.Background(), "INBOX", email.UID, testFolder)
+	if err != nil {
+		cleanupEmail(t, cli, "INBOX", email.UID)
+		t.Fatalf("MoveMessage: %v", err)
+	}
+	src, err := cli.FetchHeaders(context.Background(), "INBOX", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range src {
+		if e.UID == email.UID {
+			t.Errorf("uid %d still listed in INBOX after MOVE", email.UID)
+		}
+	}
+	moved := waitForEmail(t, cli, testFolder, subject, 10*time.Second)
+	if destUID != 0 && moved.UID != destUID {
+		t.Errorf("dest UID %d != COPYUID %d", moved.UID, destUID)
+	}
+	cleanupEmail(t, cli, testFolder, moved.UID)
+}
