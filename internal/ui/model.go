@@ -140,6 +140,15 @@ type (
 	}
 	bgScreenDoneMsg struct{ moved, total int }
 
+	// folderPrefetchedMsg carries one background-fetched folder for the cache
+	// only (never the visible list) and the folders still to prefetch.
+	folderPrefetchedMsg struct {
+		account   string
+		folder    string
+		emails    []imap.Email // nil on error; the folder simply stays uncached
+		remaining []string
+	}
+
 	// bgVipFolderFetchedMsg carries a non-Inbox folder fetch used purely to
 	// dispatch desktop notifications for VIP senders whose mail the daemon
 	// (or any other sync path) may have already moved out of Inbox.
@@ -2201,6 +2210,55 @@ func (m Model) bgFetchInboxCmd() tea.Cmd {
 	}
 }
 
+// prefetchList returns the IMAP names of every tab folder that is neither
+// exclude nor already cached, ToScreen first (the most common first switch).
+func (m Model) prefetchList(exclude string) []string {
+	account := m.activeAccountName()
+	var out []string
+	add := func(f string) {
+		if f == "" || f == exclude {
+			return
+		}
+		if _, ok := m.folderCache[cacheKey(account, f)]; ok {
+			return
+		}
+		for _, x := range out {
+			if x == f {
+				return
+			}
+		}
+		out = append(out, f)
+	}
+	add(m.cfg.Folders.ToScreen)
+	for _, label := range m.folders {
+		add(folderLabelToIMAP(label, m.cfg.Folders))
+	}
+	return out
+}
+
+// prefetchFoldersCmd fetches remaining[0] on the background connection and
+// hands the rest back through folderPrefetchedMsg so folders load one after
+// another, never in parallel with a user action on the primary connection.
+func (m Model) prefetchFoldersCmd(remaining []string) tea.Cmd {
+	if len(remaining) == 0 {
+		return nil
+	}
+	cli := m.bgImapCli()
+	account := m.activeAccountName()
+	folder, rest := remaining[0], remaining[1:]
+	n := m.cfg.UI.InboxCount
+	return func() tea.Msg {
+		if cli == nil {
+			return folderPrefetchedMsg{account: account, folder: folder, remaining: rest}
+		}
+		emails, err := cli.FetchHeaders(nil, folder, n)
+		if err != nil {
+			return folderPrefetchedMsg{account: account, folder: folder, remaining: rest}
+		}
+		return folderPrefetchedMsg{account: account, folder: folder, emails: emails, remaining: rest}
+	}
+}
+
 // bgFetchVipFolderCmd silently fetches headers from one configured
 // notification folder (other than Inbox, which is handled by the regular bg
 // sync). The result feeds straight into the notifier — no auto-screening,
@@ -2409,6 +2467,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshing = false
 			return m, nil
 		}
+		// Startup prefetch: after the first folder ever applies to the visible
+		// list, warm the cache for the other tab folders on the background
+		// connection so later switches are instant too.
+		var prefetchCmd tea.Cmd
+		if !m.prefetched && m.cfg.UI.InstantSwitch() {
+			m.prefetched = true
+			prefetchCmd = m.prefetchFoldersCmd(m.prefetchList(msg.folder))
+		}
 		m.loading = false
 		m.refreshing = false
 		prevCursor := selectedEmail(m.inbox) // keep the cursor on the same email after reload
@@ -2450,14 +2516,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = ""
 			m.isError = false
 			m.mailtoBody = mp.Body
-			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 		}
 
 		// First-run welcome: show a brief intro popup.
 		if config.IsFirstRun() {
 			config.MarkWelcomeShown()
 			m.state = stateWelcome
-			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+			return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 		}
 
 		// Auto-screen: silently apply screener moves on every inbox load.
@@ -2473,7 +2539,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err := m.validateScreenerSafety(); err != nil {
 				m.status = err.Error()
 				m.isError = true
-				return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+				return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 			}
 			if moves := m.previewAutoScreen(); len(moves) > 0 {
 				m.maybeNotifyInbox(msg.folder, msg.emails, moves)
@@ -2483,7 +2549,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					moving[i] = *mv.email
 				}
 				listCmd := m.removeFromList(moving) // hidden before the first draw; MOVEs run behind it
-				return m, tea.Batch(listCmd, m.fetchFolderCountsCmd(), m.spinner.Tick, m.execAutoScreenCmd(moves))
+				return m, tea.Batch(listCmd, m.fetchFolderCountsCmd(), m.spinner.Tick, m.execAutoScreenCmd(moves), prefetchCmd)
 			}
 		}
 		// Notify on any folder load that matches the user's allowlist — not
@@ -2498,7 +2564,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cfg.Notifications.FolderAllowed(m.cfg.Folders.LabelFor(msg.folder)) {
 			m.maybeNotifyInbox(msg.folder, msg.emails, nil)
 		}
-		return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd())
+		return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
 
 	case folderCountsMsg:
 		m.folderCounts = msg.counts
@@ -3067,6 +3133,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.folderCache = make(map[string]folderSnapshot)
 		}
 		m.folderCache[cacheKey(msg.account, m.cfg.Folders.Inbox)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+		// The UIDs belong to msg.account; the MOVEs below would run on the
+		// account active now. If the user switched accounts mid-sync, skip
+		// this cycle — the next tick re-fetches for the new account.
+		if msg.account != "" && msg.account != m.activeAccountName() {
+			m.bgSyncInProgress = false
+			return m, nil
+		}
 		if err := m.validateScreenerSafety(); err != nil {
 			m.status = err.Error()
 			m.isError = true
@@ -3082,6 +3155,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// bgSyncInProgress stays set - will be cleared in bgScreenDoneMsg
 		return m, m.bgExecAutoScreenCmd(moves)
+
+	case folderPrefetchedMsg:
+		if msg.emails != nil {
+			if m.folderCache == nil {
+				m.folderCache = make(map[string]folderSnapshot)
+			}
+			if _, already := m.folderCache[cacheKey(msg.account, msg.folder)]; !already {
+				m.folderCache[cacheKey(msg.account, msg.folder)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+			}
+		}
+		return m, m.prefetchFoldersCmd(msg.remaining)
 
 	case bgVipFolderFetchedMsg:
 		if msg.emails == nil {

@@ -466,3 +466,73 @@ func TestCache_ReloadInSearchViewDoesNotHangSpinner(t *testing.T) {
 		t.Errorf("search rows must remain, got %v", got)
 	}
 }
+
+func TestPrefetch_ListStartsWithToScreenAndSkipsCachedAndActive(t *testing.T) {
+	m := instantModel(t, 1)
+	m.folderCache = map[string]folderSnapshot{cacheKey("P", "Archive"): {}}
+	got := m.prefetchList("INBOX")
+	if len(got) == 0 || got[0] != "ToScreen" {
+		t.Fatalf("ToScreen must be first, got %v", got)
+	}
+	for _, f := range got {
+		if f == "INBOX" || f == "Archive" {
+			t.Errorf("active/cached folder %q must be skipped", f)
+		}
+	}
+}
+
+func TestPrefetch_MsgFillsCacheOnlyAndChains(t *testing.T) {
+	m := instantModel(t, 1)
+	ts := mkEmail(50, "<ts@x>", "queued", "New <n@example.com>", 0, false)
+	ts.Folder = "ToScreen"
+	res, cmd := m.Update(folderPrefetchedMsg{account: "P", folder: "ToScreen", emails: []imap.Email{ts}, remaining: []string{"Feed"}})
+	mm := res.(Model)
+	if got := uidsInList(mm); len(got) != 1 || got[0] != 1 {
+		t.Errorf("prefetch must never touch the visible list, got %v", got)
+	}
+	if snap, ok := mm.folderCache[cacheKey("P", "ToScreen")]; !ok || len(snap.emails) != 1 {
+		t.Error("prefetched folder not cached")
+	}
+	if cmd == nil {
+		t.Error("remaining folders must be chained")
+	}
+	res, cmd = mm.Update(folderPrefetchedMsg{account: "P", folder: "Feed", emails: nil, remaining: nil})
+	if cmd != nil {
+		t.Error("chain ends when remaining is empty")
+	}
+}
+
+func TestPrefetch_ScheduledOnceAfterFirstLoad(t *testing.T) {
+	m := instantModel(t, 1)
+	res, cmd := m.Update(emailsLoadedMsg{emails: m.emails, folder: "INBOX", account: "P"})
+	mm := res.(Model)
+	if !mm.prefetched || cmd == nil {
+		t.Error("first load must schedule the prefetch")
+	}
+	f := false
+	mm.cfg.UI.InstantFolderSwitch = &f
+	mm.prefetched = false
+	res, _ = mm.Update(emailsLoadedMsg{emails: m.emails, folder: "INBOX", account: "P"})
+	if res.(Model).prefetched {
+		t.Error("no prefetch when instant_folder_switch is off")
+	}
+}
+
+func TestBgSync_SkipsAutoScreenWhenAccountChanged(t *testing.T) {
+	m := instantModel(t, 1)
+	if err := m.screener.Block("Sender <s@example.com>"); err != nil {
+		t.Fatal(err)
+	}
+	m.bgSyncInProgress = true
+	res, cmd := m.Update(bgInboxFetchedMsg{emails: m.emails, account: "W"})
+	mm := res.(Model)
+	if cmd != nil {
+		t.Error("account changed mid-sync: no follow-up cmd must be scheduled")
+	}
+	if mm.bgSyncInProgress {
+		t.Error("bgSyncInProgress must be cleared")
+	}
+	if snap, ok := mm.folderCache[cacheKey("W", "INBOX")]; !ok || len(snap.emails) != len(m.emails) {
+		t.Error("snapshot must still be cached under the fetched account W")
+	}
+}
