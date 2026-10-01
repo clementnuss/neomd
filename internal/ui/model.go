@@ -3986,7 +3986,7 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.inbox.Select(len(m.inbox.Items()) - 1)
 		return m, nil
 
-	case "d":
+	case "d", "ctrl+d": // ctrl+d: vim half-page habit; reader viewport already accepts it
 		next := m.inbox.Index() + m.inboxPageStep()
 		if max := len(m.inbox.Items()) - 1; next > max {
 			next = max

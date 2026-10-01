@@ -2,6 +2,11 @@
 
 # 2026-09-30
 
+- **`ctrl+d` pages down in the inbox list** — muscle memory from vim kept sending
+  `ctrl+d` at the inbox, where it did nothing (the reader viewport and the `?` help
+  overlay already accepted it). `ctrl+d` is now an alias for `d` in `updateInbox`
+  (`internal/ui/model.go`); `d` is unchanged. `ctrl+u` stays "clear all marks", so
+  page-up remains plain `u`. Test: `TestInbox_CtrlDPagesDownLikeD`.
 - **Opt-in IMAP timing trace (`NEOMD_IMAP_TRACE=1`)** — every "neomd feels slow" report
   used to require guessing which IMAP call was slow. Setting `NEOMD_IMAP_TRACE=1` now
   makes every public `internal/imap` operation (`FetchHeaders`, `FetchHeadersByUID`,
