@@ -82,7 +82,7 @@ Exact entries match before `@domain` entries, but for `notify.txt` the priority 
 Notifications are sent with these arguments:
 
 ```
-notify-send -i <icon> -t <expire_ms> -a neomd "neomd: <From>" "<Subject>"
+notify-send -i <icon> -t <expire_ms> -a neomd "󱡯: :<From>" "<Subject>"
 ```
 
 Subjects longer than 200 characters are truncated with `…`.

@@ -22,23 +22,31 @@ starttls = false                    # optional: force STARTTLS (see TLS/STARTTLS
 tls_cert_file = ""                  # optional PEM cert/CA for self-signed local bridges
 imap_disabled = false               # set true for send-only accounts (no IMAP connection)
 
-# OAuth2 authenticated accounts are supported, it just need the relevant fields. Note that the password field is not required.
+# OAuth2 authenticated accounts are supported — set auth_type = "oauth2" plus the
+# relevant oauth2_* fields. Note that the password field is not required.
 [[accounts]]
 name     = "Personal"
 imap     = "imap.example.com:993"   # :993 = TLS, :143 = STARTTLS
 smtp     = "smtp.example.com:587"
 user     = "me@example.com"
 from     = "Me <me@example.com>"
+auth_type = "oauth2"                # required — selects OAuth2 instead of password auth
 oauth2_client_id = ""
 oauth2_client_secret = ""
 oauth2_issuer_url = ""
 oauth2_scopes = ["", ""]
+oauth2_redirect_port = 8085          # optional; local callback port (default 8085) —
+                                      # register http://localhost:<port>/callback as a
+                                      # redirect URI with your provider
 
 # Multiple accounts supported — add more [[accounts]] blocks
 # Switch between them with `ctrl+a` in the inbox
 
 # Root-level settings
 store_sent_drafts_in_sending_account = false  # default: Sent/Drafts stay in the first IMAP account
+auto_bcc = ""       # default: "" = disabled. Set to "addr@example.com" or "Name <addr@example.com>"
+                     # to BCC every outgoing email to that address (e.g. an external archive).
+                     # Shown in the composer and pre-send review so it's never a silent BCC.
 default_from = ""  # default: "" = new composes/replies use the first [[accounts]] block.
                     # Set to an address (e.g. "simon@ssp.sh") to default the From
                     # field to a different account or [[senders]] alias without
@@ -108,7 +116,7 @@ Use an app-specific password (Gmail, Fastmail, Hostpoint, etc.) rather than your
 
 With `instant_folder_switch = true` (the default), switching tabs shows the last list you saw for that folder immediately and refreshes it behind the scenes (`↻` next to the tabs while that fetch is in flight), and the other tab folders are prefetched once after the first load. Set it to `false` to go back to a spinner on every folder switch and to skip the prefetch — that is all the knob controls. Deletes/archives/moves and screening update the visible list right away regardless of this setting, and the underlying IMAP round-trip reductions (pipelined SELECT, a background connection for tab counts/sync, MOVE without a forced re-SELECT) stay in effect either way.
 
-Set `NEOMD_IMAP_TRACE=1` in the environment before launching neomd (`NEOMD_IMAP_TRACE=1 neomd`) to append one line per IMAP operation — timestamp, operation, milliseconds — to `~/.cache/neomd/imap-trace.log`. It's off by default (no file, no cost) and is the first thing to check for a "neomd feels slow" report: the number of trace lines per keypress is the round-trip count for that action.
+Set `NEOMD_IMAP_TRACE=1` in the environment before launching neomd (`NEOMD_IMAP_TRACE=1 neomd`) to append one line per traced IMAP call — timestamp, operation, milliseconds — to `~/.cache/neomd/imap-trace.log`. Both the primary and the background connection write to the same file, with no tag distinguishing them, and not every IMAP call is traced (folder loads, search, STATUS, body fetch, MOVE/EXPUNGE and flag changes are; a few operations like the NOOP health probe and raw fetch are not). It's off by default (no file, no cost) and is the first thing to check for a "neomd feels slow" report — treat the line count per keypress as a rough indication of activity, not an exact round-trip count.
 
 
 
@@ -507,17 +515,19 @@ args    = ["edit {file}: {prompt}"]     # default: tells claude what file + what
 
 ## OAuth2 Authentication
 
-Neomd supports OpenAuth2 authenticated accounts, you just need to add `oauth2_client_id`, `oauth2_client_secret`, `oauth2_scopes` and `oauth2_issuer_url`.
+Neomd supports OAuth2 authenticated accounts: set `auth_type = "oauth2"` plus `oauth2_client_id`, `oauth2_client_secret`, `oauth2_scopes` and `oauth2_issuer_url`. Without `auth_type = "oauth2"` neomd still expects a password and login fails.
 
 Note that when using oauth2 authentication, the password field is not required in the account configuration.
 
+An optional `oauth2_redirect_port` (default `8085`) sets the local callback port used during the OAuth2 flow; register `http://localhost:<port>/callback` as a redirect URI with your provider if you change it.
+
 ### Issuer URL
 
-By default, if an issuer URL is provided, i.e.: `https://login.microsoftonline.com/common/v2.0` for Office265 accounts, neomd will search for the OpenID Connect discovery URL: `/.well-known/openid-configuration` resolving then the `oauth2_token_url` and `oauth2_auth_url`. These parameters can be provided manually as well.
+By default, if an issuer URL is provided, i.e.: `https://login.microsoftonline.com/common/v2.0` for Office365 accounts, neomd will search for the OpenID Connect discovery URL: `/.well-known/openid-configuration` resolving then the `oauth2_token_url` and `oauth2_auth_url`. These parameters can be provided manually as well.
 
 ### Scopes
 
-The scopes required depends on the provider and is better confirmed by your email provider. As an example, for Office365 acounts, the following scopes are required for IMAP: `"https://outlook.office365.com/IMAP.AccessAsUser.All", "offline_access"`.
+The scopes required depends on the provider and is better confirmed by your email provider. As an example, for Office365 accounts, the following scopes are required for IMAP: `"https://outlook.office365.com/IMAP.AccessAsUser.All", "offline_access"`.
 
 ### Reference documentation for GMAIL and Office365
 

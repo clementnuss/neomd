@@ -515,5 +515,5 @@ chmod +x ~/.termux/boot/neomd-daemon.sh
 - The daemon only **reads** screener list files and **moves** emails via IMAP
 - All sender classification (adding to lists) happens in the TUI
 - File watching requires the screener list directory to exist
-- The daemon uses the first configured account from `config.toml`
+- The daemon uses the first **IMAP-enabled** account from `config.toml` (accounts with `imap_disabled = true` are skipped)
 - IMAP connection is kept alive and automatically reconnects on failures

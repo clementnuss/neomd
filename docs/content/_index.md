@@ -42,7 +42,7 @@ toc: false
   >}}
   {{< hextra/feature-card
     title="Superhuman Speed"
-    subtitle="Folder switches in ~33ms (on fast IMAP providers like Hostpoint). Every action is instant — no loading spinners, no delays. Navigate with Vim motions."
+    subtitle="Seen folders switch instantly from cache on any provider; moves and screening update the list before the server answers. Navigate with Vim motions."
     class="aspect-auto md:aspect-[1.1/1] max-md:min-h-[340px]"
     style="background: radial-gradient(ellipse at 50% 80%,rgba(142,53,74,0.15),hsla(0,0%,100%,0));"
   >}}
@@ -60,7 +60,7 @@ toc: false
   >}}
   {{< hextra/feature-card
     title="Keyboard-First"
-    subtitle="Vim motions everywhere. j/k navigation, gg/G jumps, / search, numbered links [1]-[0], multi-select with m, undo with u."
+    subtitle="Vim motions everywhere. j/k navigation, gg/G jumps, / search, numbered links [1]-[0], multi-select with m, undo with U."
     class="aspect-auto md:aspect-[1.1/1] max-md:min-h-[340px]"
     style="background: radial-gradient(ellipse at 50% 80%,rgba(59,130,246,0.15),hsla(0,0%,100%,0));"
   >}}

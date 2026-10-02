@@ -141,7 +141,7 @@ These features are the one that makes neomd different to other email clients out
 - **Write in Markdown, send beautifully** — compose in `$EDITOR` (defaults to `nvim`), send as `multipart/alternative`: raw Markdown as plain text + goldmark-rendered HTML so recipients get clickable links, bold, headers, inline code, and code blocks [→](https://neomd.ssp.sh/docs/sending/)
 - **HEY-style screener** — unknown senders land in `ToScreen`; press `I/O/F/P` to approve, block, mark as Feed, or mark as PaperTrail; reuses your existing `screened_in.txt` lists from neomutt; also acts as a **phishing defense** — impersonation emails from senders you've already approved land in ToScreen instead of Inbox, making them immediately suspicious [→](https://neomd.ssp.sh/docs/screener/)
 - **Glamour reading** — incoming emails rendered as styled Markdown in the terminal [→](https://neomd.ssp.sh/docs/reading/)
-- **Spy pixel blocking** — tracking pixels from newsletter services (Mailchimp, SendGrid, HubSpot, etc.) are automatically detected, counted, and stripped; `°` indicator in the inbox and tracker domains in the reader header; browser view (`O`) blocks remote images via CSP — senders cannot tell if you read their email [→](https://neomd.ssp.sh/docs/reading/#spy-pixel-blocking)
+- **Spy pixel blocking** — tracking pixels from newsletter services (Mailchimp, SendGrid, HubSpot, etc.) are automatically detected, counted, and stripped in the terminal view; `°` indicator in the inbox and tracker domains in the reader header; browser view (`O`) injects a CSP that blocks scripts and frames — remote images are intentionally allowed there since you're explicitly choosing to see the full email [→](https://neomd.ssp.sh/docs/reading/#spy-pixel-blocking)
 - **GitHub/Obsidian-style callouts** — compose emails with callout syntax `> [!note]`, `> [!tip]`, `> [!warning]` for styled alert boxes in HTML emails; rendered with colored left borders, subtle backgrounds, and emoji icons [→](https://neomd.ssp.sh/docs/sending/#callouts-admonition)
 - **Listmonk newsletter integration** — compose an email to a virtual address (e.g. `listmonk@ssp.sh`) and neomd creates a scheduled campaign in [Listmonk](https://listmonk.app) via API instead of sending via SMTP; configure multiple trigger addresses to target different subscriber lists; pre-send screen shows campaign details [→](https://neomd.ssp.sh/docs/integrations/listmonk/)
 
@@ -164,13 +164,13 @@ Keep your inbox clean without effort.
 - **Attachments** — attach files from the pre-send screen via yazi (`a`); images appear inline in the email body, other files as attachments; also attach from within Neovim via `<leader>a`; the reader lists all attachments and `1`–`9` downloads and opens them [→](https://neomd.ssp.sh/docs/sending/#attachments)
 - **Emoji reactions** — press `ctrl+e` from inbox or reader to react with emoji (👍 ❤️ 😂 🎉 🙏 💯 👀 ✅); instant send with proper threading and quoted message history, no editor needed [→](https://neomd.ssp.sh/docs/sending/#emoji-reactions)
 - **Multi-select** — `m` marks emails, then batch-delete, move, or screen them all at once [→](https://neomd.ssp.sh/docs/keybindings/#multi-select--undo)
-- **Undo** — `u` reverses the last move or delete (`x`, `A`, `M*`) using the UIDPLUS destination UID [→](https://neomd.ssp.sh/docs/keybindings/#multi-select--undo)
+- **Undo** — `U` reverses the last move or delete (`x`, `A`, `M*`) using the UIDPLUS destination UID [→](https://neomd.ssp.sh/docs/keybindings/#multi-select--undo)
 
 ### Reading
 
 - **Threaded inbox** — related emails grouped together with a vertical connector line (`│`/`╰`), Twitter-style; threads detected via `In-Reply-To`/`Message-ID` headers with a subject+participant fallback; newest reply on top, root at bottom; `·` reply indicator shows which emails you've answered [→](https://neomd.ssp.sh/docs/reading/#threaded-inbox)
 - **Merge threads (HEY-style)** — collapse unrelated emails (mailer-daemon bounces, notification floods) into one titled `≡` row: mark with `m`, run `:merge <title>`; Enter opens every member across folders, replies to a merged mail are absorbed automatically, and `:merge-sender <title>` makes future mail from that sender join on its own; stored by Message-ID in `merges.toml` next to your config, so it survives folder moves and lives in dotfiles [→](https://neomd.ssp.sh/docs/reading/#merge-threads)
-- **iCalendar RSVP** — meeting invites (`text/calendar` / `.ics`) show a `📅` card in the reader; leader chord `<space> v {a|d|t}` sends an RFC 5546/6047 (iMIP) accept/decline/tentative reply; `<space> v o` hands the `.ics` off to your local calendar app via `[calendar].open_command` (default `xdg-open`, set to `morgen`, `khal`, etc.) [→](https://neomd.ssp.sh/docs/configuration/#calendar-invites-icalendar--imip)
+- **iCalendar RSVP** — meeting invites (`text/calendar` / `.ics`) show a `📅` card in the reader; leader chord `<space> v {a|d|t}` sends an RFC 5546/6047 (iMIP) accept/decline/tentative reply; `<space> v o` hands the `.ics` off to your local calendar app via `[calendar].open_command` (default `xdg-open`, set to `morgen`, `khal`, etc.) [→](https://neomd.ssp.sh/docs/configuration/#calendar-invites)
 - **Conversation view** — `T` or `:thread` shows the full conversation across folders (Inbox, Sent, Archive, etc.) in a temporary tab with `[Folder]` prefix; see your replies alongside received emails [→](https://neomd.ssp.sh/docs/reading/#conversation-view)
 - **Link opener** — links in emails are numbered `[1]`–`[0]` in the reader header; press `space+digit` to open in `$BROWSER` [→](https://neomd.ssp.sh/docs/reading/#links)
 - **Everything view** — `ge` or `:everything` shows the 50 most recent emails across all folders; find emails that were screened out, moved to spam, or otherwise hard to locate [→](https://neomd.ssp.sh/docs/keybindings/#folders)
@@ -186,7 +186,7 @@ Keep your inbox clean without effort.
 - **Send later** — `l` in pre-send schedules delivery (`+2h`, `17:30`, `tomorrow 09:00`); the message queues in your Scheduled folder and the headless daemon delivers it on time — delete from Scheduled to cancel [→](https://neomd.ssp.sh/docs/sending/#send-later)
 - **Recipient names & contacts** — names are harvested from email headers (plus an optional contacts file / Google Contacts CSV export), used to find people by name in search and to send `Louise Nachname <l@domain.io>` instead of a bare address [→](https://neomd.ssp.sh/docs/sending/#recipient-names)
 - **Multiple From addresses** — define SMTP-only `[[senders]]` aliases (e.g. `s@ssp.sh` through an existing account); cycle with `ctrl+f` in compose and pre-send; sent copies always land in the Sent folder [→](https://neomd.ssp.sh/docs/sending/#multiple-from-addresses)
-- **OS keyring credentials** — set `password = "keyring"` to fetch the IMAP/SMTP password from your OS keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager); OAuth2 tokens also stored in keyring with file fallback for headless/SSH; resolution happens at config load so `[[senders]]` aliases inherit the resolved password automatically [→](https://neomd.ssp.sh/docs/configuration/#storing-passwords-in-the-os-keyring)
+- **OS keyring credentials** — set `password = "keyring"` to fetch the IMAP/SMTP password from your OS keyring (macOS Keychain, Linux Secret Service, Windows Credential Manager); OAuth2 tokens also stored in keyring with file fallback for headless/SSH; resolution happens at config load so `[[senders]]` aliases inherit the resolved password automatically [→](https://neomd.ssp.sh/docs/configuration/#storing-passwords-in-the-os-keyring-linux)
 - **HTML signatures** — configure separate text and HTML signatures; text signature appears in editor and plain text part, HTML signature in HTML part only; use `[html-signature]` placeholder to control inclusion per-email [→](https://neomd.ssp.sh/docs/configuration/#html-signatures)
 - **Address autocomplete** — To/Cc/Bcc fields autocomplete from screener lists; navigate with `ctrl+n`/`ctrl+p`, accept with `tab`
 
@@ -197,7 +197,7 @@ Keep your inbox clean without effort.
 - **Themes** — six built-in palettes (`kanagawa` default, `kanagawa-paper`, `kanagawa-light` for daylight terminals, `rose-pine`, `gruvbox`, `osaka-jade`); pick via `[ui].theme = "..."` and override individual colour slots in an optional `[theme]` block [→](https://neomd.ssp.sh/docs/configuration/#theming)
 
 {{< callout type="info" >}}
-neomd's **speed** depends entirely on your IMAP provider. On Hostpoint (the provider I use), a folder switch takes **~33ms** which feels instant. On Gmail, the same operation takes **~570ms** which is noticeably slow. See [Benchmark](#benchmark) for full details and how to test your provider.
+Folder switches you've seen before, deletes/archives/moves, and screening are **instant on any provider** — they're served from cache and update the list before the server answers (optimistic updates + a second IMAP connection). What still depends on your IMAP provider's latency: the **first** visit to a folder, **opening an email**, and **search**. On Hostpoint (the provider I use) those cost about 2 round trips at ~33ms each; on Gmail the same round trips run at ~570ms each. See [Benchmark](#benchmark) for full details and how to test your provider.
 {{< /callout >}}
 
 
@@ -247,7 +247,7 @@ On first run, neomd:
 2. Creates `~/.config/neomd/lists/` for screener allowlists (or uses your custom paths from config)
 3. Creates any missing IMAP folders (ToScreen, Feed, PaperTrail, etc.) automatically
 
-Neomd also runs on Android (more for fun) — see [docs/content/docs/configuration/android.md](docs/content/configuration/android).
+Neomd also runs on Android (more for fun) — see [docs/content/docs/configuration/android.md](docs/content/docs/configuration/android.md).
 
 ## Configuration
 
@@ -281,7 +281,7 @@ For the full configuration reference including multiple accounts, OAuth2 authent
 
 **Provider-specific guides:**
 
-- Gmail: [docs/content/docs/configuration/gmail.md](docs/content/docs/configuration/gmail.md) — folder name mapping and OAuth2 setup
+- Gmail: [docs/content/docs/configuration/gmail.md](docs/content/docs/configuration/gmail.md) — folder name mapping, app-password setup, and performance notes
 - Proton Mail Bridge: [docs/content/docs/configuration/proton-bridge.md](docs/content/docs/configuration/proton-bridge.md) — non-standard port configuration
 
 ### Onboarding
@@ -306,7 +306,7 @@ By default, neomd loads and auto-screens only the newest `200` Inbox emails (`[u
 You choose who can land in your Inbox. Bye-bye spam. This is the beauty of [HEY-Screener](https://www.hey.com/features/the-screener/), and neomd implements the same concept.
 
 {{< callout type="info" >}}
-To disable auto-screening entirely, set `auto_screen_on_load = false` in `[ui]` config. Run `:debug` inside neomd if something isn't working.
+To disable auto-screening entirely, set **both** `auto_screen_on_load = false` and `bg_sync_interval = 0` in `[ui]` config — background sync screens on its own 5-minute timer regardless of the load-time setting. Run `:debug` inside neomd if something isn't working.
 {{< /callout >}}
 
 
@@ -337,15 +337,25 @@ Discarding unsent mail now asks for confirmation in compose/pre-send, and `:reco
 ### Dev: Makefile Commands
 
 ```
-make build    compile ./neomd
-make run      build and run
-make install  install to ~/.local/bin
-make test     run tests
-make vet      go vet
-make fmt      gofmt -w .
-make tidy     go mod tidy
-make clean    remove compiled binary
-make help     print this list
+make build             compile ./neomd
+make run               build and run
+make install           install to ~/.local/bin
+make test              run unit tests (fast, no network)
+make test-integration  integration tests against real IMAP/SMTP (demo account)
+make vet               go vet
+make fmt               gofmt -w .
+make fmt-check         report unformatted files (nonzero exit if any) — CI/pre-commit
+make tidy              go mod tidy
+make docs              regenerate keybindings.md and sync README to the docs site
+make docs-serve        serve Hugo docs locally at http://localhost:1313
+make docs-build        build Hugo docs site to docs/public/
+make daemon            build and run headless (--headless); screener loop, no TUI
+make demo / demo-hp    run with demo configs
+make benchmark         IMAP latency benchmark for Hostpoint and Gmail
+make android           cross-compile ARM64 for Termux
+make release VERSION=v0.1.0  tag and push a new release
+make clean             remove compiled binary
+make help              print this list
 ```
 
 ## Stack
@@ -369,9 +379,9 @@ See [CHANGELOG.md](CHANGELOG.md) for what's new.
 
 ## Benchmark
 
-neomd's responsiveness depends entirely on your IMAP server. Every folder switch, email open, and move requires IMAP round-trips (SELECT + UID SEARCH + FETCH). Here are real measurements from the same machine, same network:
+neomd's responsiveness still depends on your IMAP server for the first visit to a folder, opening an email, and search — folder switches you've already seen, deletes/archives/moves, and screening are instant on any provider (cache + optimistic updates + a second IMAP connection; see the round-trip table below). Here are real per-command measurements from the same machine, same network — note these no longer sum into one serial "folder switch" the way neomd issues them now (SELECT is pipelined with SEARCH/FETCH):
 
-**Hostpoint** (dedicated email provider) — folder switch: **~33ms total**
+**Hostpoint** (dedicated email provider) — per-command latency
 | Operation | Time |
 |-----------|------|
 | SELECT | 12ms |
@@ -379,7 +389,7 @@ neomd's responsiveness depends entirely on your IMAP server. Every folder switch
 | FETCH (200 emails) | 76ms |
 | MOVE (1 email) | 46ms |
 
-**Gmail** — folder switch: **~570ms total** (17x slower than Hostpoint)
+**Gmail** — per-command latency (17x slower than Hostpoint)
 | Operation | Time |
 |-----------|------|
 | SELECT | 200ms |
@@ -387,7 +397,7 @@ neomd's responsiveness depends entirely on your IMAP server. Every folder switch
 | FETCH (2 emails) | 190ms |
 | MOVE (1 email) | 339ms |
 
-**Outlook/Office365** (with OAuth2 authentication and different network - not really comparable, but gives a indication) — folder switch: **~269ms total** (8x slower than Hostpoint)
+**Outlook/Office365** (with OAuth2 authentication and different network - not really comparable, but gives a indication) — per-command latency (8x slower than Hostpoint)
 | Operation | Time |
 |-----------|------|
 | SELECT | 45ms |
@@ -404,9 +414,9 @@ What matters more than any single operation's millisecond cost is **how many rou
 | Screen-in one row | ~10 | 0 (3 behind the list, primary connection) | instant |
 | Delete/archive/move N rows | 2N + 7 | 0 (N behind the list, primary connection) | instant |
 | Open email | 1–2 | 1–2 | unchanged |
-| Search across folders | 2 per folder | 1 per folder | halved |
+| Search across folders | 2 per folder | 1 per folder (2 for a folder with hits) | ~halved |
 
-Interestingly, Gmail benchmarks fast on a **fresh single connection** (`scripts/imap-benchmark.sh` shows ~70ms total, same as Hostpoint). But on a **sustained session** with sequential commands — which is how neomd actually uses IMAP — Gmail adds ~180ms latency per command. This is likely Gmail's internal label-to-folder translation and session management overhead. The result: every action in neomd feels much slower on Gmail, while Hostpoint stays instant.
+Interestingly, Gmail benchmarks fast on a **fresh single connection** (`scripts/imap-benchmark.sh` shows ~70ms total, same as Hostpoint). But on a **sustained session** with sequential commands — which is how neomd actually uses IMAP — Gmail adds ~180ms latency per command. This is likely Gmail's internal label-to-folder translation and session management overhead. The result: on Gmail, the first visit to a folder, opening an email, and search still feel slower than on Hostpoint; cached folder switches, moves, screening, and `n` are instant on any provider, Gmail included.
 
 {{< callout type="info" >}}
 **Gmail is not recommended.** If you're on Gmail, consider a dedicated email provider (Hostpoint, Fastmail, HEY, Migadu, etc.) for the best neomd experience. Or use Gmail just for fun :). See [docs/content/docs/configuration/gmail.md](docs/content/docs/configuration/gmail.md) for Gmail-specific folder configuration.

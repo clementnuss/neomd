@@ -177,16 +177,9 @@ connection:
 | Open email | 1–2 | 1–2 | unchanged |
 | Search across folders | 2 per folder | 1 per folder | halved |
 
-**Measured, IMAP layer only** (`.bench/main.go`, a throwaway program against
-`~/.config/neomd-demo-hostpoint/config.toml`; medians of two 3-run passes; NOOP round
-trip on this run ~10–17 ms steady-state, vs. 250–450 ms on the saturated-Wi-Fi baseline
-run recorded in `docs/superpowers/plans/2026-09-30-instant-imap.md` — the two runs are
-not on comparable networks, only the round-trip-count reasoning above is): `Ping` 17 ms,
-`FetchHeaders(Inbox, 200)` 70 ms, `FetchHeaders(ToScreen, 200)` 92 ms,
-`FetchUnseenCounts` (4 folders) 33 ms. **Felt, TUI-level before/after milliseconds are
-not in this entry** — they need a real terminal driving `make demo-hp`, which this
-environment doesn't have; those numbers come from the user's production soak (plan Task
-10 step 8) before merge into `dev`.
+To measure your own provider and session instead of relying on the numbers above, set
+`NEOMD_IMAP_TRACE=1` (see Configuration → `NEOMD_IMAP_TRACE`) and count trace lines per
+keypress as a rough indication of IMAP activity.
 
 # 2026-09-28
 

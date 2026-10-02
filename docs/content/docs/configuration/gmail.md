@@ -48,11 +48,11 @@ Similarly, Gmail doesn't expose its scheduled send feature via IMAP, so `[Gmail]
 
 ## Performance Warning
 
-Gmail's IMAP is significantly slower than dedicated email providers. On a sustained session, each IMAP command takes ~180ms on Gmail vs ~12ms on providers like Hostpoint or Fastmail. This means every folder switch, email open, and move feels noticeably slower (~570ms vs ~33ms per folder switch).
+Gmail's IMAP is significantly slower than dedicated email providers. On a sustained session, each IMAP command takes ~180ms on Gmail vs ~12ms on providers like Hostpoint or Fastmail. This means the first visit to a folder, opening an email, and search feel noticeably slower (roughly 2 round trips at ~180ms each). Folder switches you've already seen, moves, and screening are instant regardless of provider — they're served from cache with optimistic updates and don't wait on Gmail's latency.
 
 See the [Benchmark section](https://github.com/ssp-data/neomd#benchmark) in the README for detailed measurements.
 
-For the best neomd experience, consider a dedicated email provider. If you still want to use Gmail, it works — just expect ~1 second per action instead of instant.
+For the best neomd experience, consider a dedicated email provider. If you still want to use Gmail, it works — just expect the first folder load, opening an email, and search to take roughly a second; everything else (cached switches, moves, screening) is instant.
 
 ## App Password
 
