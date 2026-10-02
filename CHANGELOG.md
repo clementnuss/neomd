@@ -1,5 +1,9 @@
 # Changelog
 
+# 2026-10-02
+
+- **`n` read/unread toggle flips at once; no more lag when toggling a run of emails** — after the instant-IMAP work a cached folder switch leaves a refresh fetch in flight on the primary connection, and every `n` STORE queued behind it; worse, when that refresh landed it carried the pre-toggle `\Seen` flag, so the row stayed (or snapped back to) its old state until the STORE's reply arrived. Holding `n` over a few rows looked like lag. The flag is now flipped locally the moment `n` is pressed (list and cached snapshot, `setSeenLocal`), the cursor moves on, and the STORE runs behind the list (`toggleSeenCmd(ops []seenOp)`, plan captured by value). A `pendingSeen` set (account+folder+UID → wanted state) overlays every fetch result that lands while a STORE is in flight (`withPendingSeen`, applied in `emailsLoadedMsg`, `bgInboxFetchedMsg` and the prefetch handler — the latter now also applies `withoutPending`), so a refresh cannot undo the toggle. `toggleSeenDoneMsg` releases the pending state; on an error only the ops that never reached the server are reverted and the error is shown in the status line. Marked-batch `n` no longer hides the list behind a spinner and no longer reloads the folder. Server-side STOREs are unchanged. Tests: `TestToggleSeen_FlipsImmediatelyNoSpinner`, `TestToggleSeen_RefreshLandingMidFlightKeepsFlag`, `TestToggleSeen_DoneClearsPendingAndKeepsFlag`, `TestToggleSeen_ErrorRevertsAndShowsStatus`, `TestToggleSeen_BatchMarkedFlipsAllNoSpinner`
+
 # 2026-09-30
 
 - **`ctrl+d` pages down in the inbox list** — muscle memory from vim kept sending

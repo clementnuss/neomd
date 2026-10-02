@@ -127,11 +127,14 @@ type (
 		undo    []undoMove
 		removed []removalKey // optimistic rows this MOVE run covers (set by releaseOnDone)
 	}
-	undoDoneMsg       struct{}
+	undoDoneMsg struct{}
+	// toggleSeenDoneMsg reports the STOREs of one n press. ops[:done] reached
+	// the server; ops[done:] did not (err set) and must be reverted locally.
 	toggleSeenDoneMsg struct {
-		uid  uint32
-		seen bool
-		err  error
+		account string
+		ops     []seenOp
+		done    int
+		err     error
 	}
 	errMsg struct{ err error }
 	// folderErrMsg is fetchFolderCmd's failure: it names the folder and
@@ -578,6 +581,14 @@ type removalKey struct {
 	uid     uint32
 }
 
+// seenOp is one planned \Seen change, captured by value so the STORE
+// goroutine never reads through a pointer into the list.
+type seenOp struct {
+	folder string
+	uid    uint32
+	seen   bool
+}
+
 // folderSnapshot is the last header list fetched for one account+folder.
 type folderSnapshot struct {
 	emails    []imap.Email
@@ -629,6 +640,10 @@ type Model struct {
 	// finished; fetch results landing meanwhile are filtered so a stale
 	// refresh cannot resurface them. Released by batchDoneMsg/autoScreenDoneMsg.
 	pendingRemoval map[removalKey]bool
+	// pendingSeen holds the wanted \Seen state of rows toggled with n whose
+	// STORE has not finished; fetch results landing meanwhile take this
+	// state so a refresh cannot snap the flag back. Cleared by toggleSeenDoneMsg.
+	pendingSeen map[removalKey]bool
 
 	// Reader
 	reader          viewport.Model
@@ -1373,18 +1388,43 @@ func collectRcptTo(to, cc, bcc string) []string {
 }
 
 // toggleSeenCmd flips the \Seen flag on an email and updates local state.
-func (m Model) toggleSeenCmd(e *imap.Email) tea.Cmd {
-	uid := e.UID
-	folder := e.Folder
-	newSeen := !e.Seen
+// toggleSeenCmd runs the STOREs for ops in order on the primary connection.
+// The list was already flipped optimistically; the done message only
+// releases pendingSeen and reverts whatever did not reach the server.
+func (m Model) toggleSeenCmd(ops []seenOp) tea.Cmd {
+	cli := m.imapCli()
+	account := m.activeAccountName()
 	return func() tea.Msg {
-		var err error
-		if newSeen {
-			err = m.imapCli().MarkSeen(nil, folder, uid)
-		} else {
-			err = m.imapCli().MarkUnseen(nil, folder, uid)
+		for i, o := range ops {
+			var err error
+			if o.seen {
+				err = cli.MarkSeen(nil, o.folder, o.uid)
+			} else {
+				err = cli.MarkUnseen(nil, o.folder, o.uid)
+			}
+			if err != nil {
+				return toggleSeenDoneMsg{account: account, ops: ops, done: i, err: err}
+			}
 		}
-		return toggleSeenDoneMsg{uid: uid, seen: newSeen, err: err}
+		return toggleSeenDoneMsg{account: account, ops: ops, done: len(ops)}
+	}
+}
+
+// setSeenLocal sets the \Seen flag of folder/uid in the visible list and in
+// the active account's cached snapshot of that folder (set, not toggle, so
+// it is safe when the two alias the same array).
+func (m *Model) setSeenLocal(folder string, uid uint32, seen bool) {
+	for i := range m.emails {
+		if m.emails[i].UID == uid && m.emails[i].Folder == folder {
+			m.emails[i].Seen = seen
+		}
+	}
+	if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), folder)]; ok {
+		for i := range snap.emails {
+			if snap.emails[i].UID == uid && snap.emails[i].Folder == folder {
+				snap.emails[i].Seen = seen
+			}
+		}
 	}
 }
 
@@ -1771,6 +1811,25 @@ func (m Model) withoutPending(account string, emails []imap.Email) []imap.Email 
 	return out
 }
 
+// withPendingSeen overlays the wanted \Seen state of in-flight n toggles on
+// a fetch result for account ("" = active), in place. A fetch that started
+// before the STORE still carries the old flag; applying it would make the
+// row snap back until the STORE's reply arrives.
+func (m Model) withPendingSeen(account string, emails []imap.Email) []imap.Email {
+	if len(m.pendingSeen) == 0 {
+		return emails
+	}
+	if account == "" {
+		account = m.activeAccountName()
+	}
+	for i := range emails {
+		if seen, ok := m.pendingSeen[removalKey{account: account, folder: emails[i].Folder, uid: emails[i].UID}]; ok {
+			emails[i].Seen = seen
+		}
+	}
+	return emails
+}
+
 // inSyntheticView reports an off-tab view whose rows are not one folder
 // (Search, Everything, Thread, Sender, Merged: …); activeFolder() maps it to
 // the tab underneath.
@@ -1996,33 +2055,6 @@ func (m Model) markAllSeenCmd() tea.Cmd {
 	return func() tea.Msg {
 		for _, o := range ops {
 			if err := m.imapCli().MarkSeen(nil, o.folder, o.uid); err != nil {
-				return batchDoneMsg{err: err}
-			}
-		}
-		return batchDoneMsg{}
-	}
-}
-
-// batchToggleSeenCmd toggles \Seen on multiple emails, emitting batchDoneMsg.
-func (m Model) batchToggleSeenCmd(emails []imap.Email) tea.Cmd {
-	type op struct {
-		folder   string
-		uid      uint32
-		markSeen bool
-	}
-	ops := make([]op, len(emails))
-	for i, e := range emails {
-		ops[i] = op{e.Folder, e.UID, !e.Seen}
-	}
-	return func() tea.Msg {
-		for _, o := range ops {
-			var err error
-			if o.markSeen {
-				err = m.imapCli().MarkSeen(nil, o.folder, o.uid)
-			} else {
-				err = m.imapCli().MarkUnseen(nil, o.folder, o.uid)
-			}
-			if err != nil {
 				return batchDoneMsg{err: err}
 			}
 		}
@@ -2588,7 +2620,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case emailsLoadedMsg:
-		msg.emails = m.withoutPending(msg.account, msg.emails)
+		msg.emails = m.withPendingSeen(msg.account, m.withoutPending(msg.account, msg.emails))
 		if m.folderCache == nil {
 			m.folderCache = make(map[string]folderSnapshot)
 		}
@@ -3009,17 +3041,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.activeFolder()))
 
 	case toggleSeenDoneMsg:
+		// The flags were flipped when n was pressed; release the pending
+		// state and revert only what never reached the server.
+		for i, op := range msg.ops {
+			delete(m.pendingSeen, removalKey{account: msg.account, folder: op.folder, uid: op.uid})
+			if i >= msg.done && msg.account == m.activeAccountName() {
+				m.setSeenLocal(op.folder, op.uid, !op.seen)
+			}
+		}
 		if msg.err != nil {
 			m.status = msg.err.Error()
 			m.isError = true
-			return m, nil
-		}
-		// Update local seen state so the N flag flips immediately
-		for i := range m.emails {
-			if m.emails[i].UID == msg.uid {
-				m.emails[i].Seen = msg.seen
-				break
-			}
 		}
 		return m, m.applyFilter()
 
@@ -3294,7 +3326,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.folderCache == nil {
 			m.folderCache = make(map[string]folderSnapshot)
 		}
-		msg.emails = m.withoutPending(msg.account, msg.emails)
+		msg.emails = m.withPendingSeen(msg.account, m.withoutPending(msg.account, msg.emails))
 		// Cache a copy: a cache-hit Tab sorts the snapshot in place, and the
 		// screener below classifies msg.emails.
 		m.folderCache[cacheKey(msg.account, m.cfg.Folders.Inbox)] = folderSnapshot{emails: append([]imap.Email(nil), msg.emails...), fetchedAt: time.Now()}
@@ -3327,7 +3359,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.folderCache = make(map[string]folderSnapshot)
 			}
 			if _, already := m.folderCache[cacheKey(msg.account, msg.folder)]; !already {
-				m.folderCache[cacheKey(msg.account, msg.folder)] = folderSnapshot{emails: msg.emails, fetchedAt: time.Now()}
+				// Same overlays as a user-driven load: a prefetch that started
+				// before an in-flight MOVE or n toggle must not resurrect the row
+				// or the old flag.
+				emails := m.withPendingSeen(msg.account, m.withoutPending(msg.account, msg.emails))
+				m.folderCache[cacheKey(msg.account, msg.folder)] = folderSnapshot{emails: emails, fetchedAt: time.Now()}
 			}
 		}
 		return m, m.prefetchFoldersCmd(msg.remaining)
@@ -3928,20 +3964,32 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.status = "Cancelled."
 			return m, nil
 		}
-		// No pending confirmation — toggle read/unread
+		// No pending confirmation — toggle read/unread. The flag flips at
+		// once (list + cache) and the STORE runs behind the list; a fetch
+		// landing meanwhile keeps the pending state, an error reverts it.
 		targets := m.targetEmails()
 		if len(targets) == 0 {
 			break
 		}
-		if len(targets) == 1 && len(m.markedUIDs) == 0 {
-			next := m.inbox.Index() + 1
-			if next < len(m.inbox.Items()) {
-				m.inbox.Select(next)
-			}
-			return m, m.toggleSeenCmd(&targets[0])
+		single := len(targets) == 1 && len(m.markedUIDs) == 0
+		if m.pendingSeen == nil {
+			m.pendingSeen = make(map[removalKey]bool)
 		}
-		m.loading = true
-		return m, tea.Batch(m.spinner.Tick, m.batchToggleSeenCmd(targets))
+		account := m.activeAccountName()
+		ops := make([]seenOp, len(targets))
+		for i, e := range targets {
+			ops[i] = seenOp{folder: e.Folder, uid: e.UID, seen: !e.Seen}
+			m.pendingSeen[removalKey{account: account, folder: e.Folder, uid: e.UID}] = !e.Seen
+			m.setSeenLocal(e.Folder, e.UID, !e.Seen)
+		}
+		m.markedUIDs = make(map[uint32]bool)
+		idx := m.inbox.Index()
+		listCmd := m.applyFilter()
+		if single && idx+1 < len(m.inbox.Items()) {
+			idx++
+		}
+		m.inbox.Select(idx)
+		return m, tea.Batch(listCmd, m.toggleSeenCmd(ops))
 
 	case "N":
 		// Jump to next unread email

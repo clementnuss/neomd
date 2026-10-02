@@ -391,12 +391,21 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   the redraw path with `optimistic := !m.loading`: success ends in a background
   refresh (`refreshActiveFolderCmd`, header `↻`), any error ends in `loading = true` +
   full reload with the error in the status line and partial undo kept. `u` undo, `X`,
-  toggle-seen, delete-all and `:screen` always take the non-optimistic spinner-reload
+  delete-all and `:screen` always take the non-optimistic spinner-reload
   path. Server calls, order and audit lines are unchanged. On error the source folders'
   snapshots are dropped (they were trimmed optimistically), and a synthetic view (Search,
   Thread, …) is left via `leaveSyntheticView` so the tab-folder reload is applied.
   Tests: `TestOptimistic_*`, `TestOptimistic_ErrorDropsOriginFolderCache`,
   `TestOptimistic_ErrorInSearchViewReloadsTabFolder`.
+- **`n` flips `\Seen` locally first; a fetch landing mid-STORE keeps the flipped state**
+  — the `n` handler sets the flag in the list and the cached snapshot (`setSeenLocal`),
+  records the wanted state in `pendingSeen` (account+folder+UID) and runs the STOREs
+  behind the list (`toggleSeenCmd(ops []seenOp)`, plan by value). `withPendingSeen`
+  overlays that state on every fetch result (`emailsLoadedMsg`, `bgInboxFetchedMsg`,
+  prefetch) until `toggleSeenDoneMsg` releases it; on error only the ops that never
+  reached the server are reverted, with the error in the status line. Never reintroduce
+  a spinner or a folder reload for `n` — the lag it caused was the bug. Tests:
+  `TestToggleSeen_*`.
 - **A removed row stays removed until its MOVE finished** — `removeFromList` records
   each target in `pendingRemoval` (account+folder+UID); `optimisticRemove` tags the MOVE
   command's `batchDoneMsg`/`autoScreenDoneMsg` with those keys (`releaseOnDone`) and the
