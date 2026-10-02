@@ -84,6 +84,7 @@ func init() {
 			desc:    "reload / refresh the current folder",
 			run: func(m *Model) (tea.Model, tea.Cmd) {
 				m.loading = true
+				m.refreshing = false
 				return m, m.fetchFolderCmd(m.activeFolder())
 			},
 		},
@@ -180,6 +181,7 @@ func init() {
 				m.loading = true
 				m.offTabFolder = "Spam" // as gS: the load guard only applies the active folder's result
 				m.status = "Spam folder — press R to reload, tab to leave"
+				m.refreshing = false
 				return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.cfg.Folders.Spam))
 			},
 		},

@@ -119,3 +119,175 @@ func TestBgSync_SkipsScreeningWhenListsEmptyOrDisabled(t *testing.T) {
 		t.Error("with lists and auto-screen on, bg sync still screens")
 	}
 }
+
+// B1: marks made while an optimistic x is in flight survive its completion.
+func TestOptimistic_MarksMadeDuringMoveSurviveCompletion(t *testing.T) {
+	m := instantModel(t, 5) // 5,4,3,2,1 cursor on 5
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	res, _ := m.updateInbox(key("x")) // removes 5, cursor on 4
+	res, _ = res.(Model).updateInbox(key("m"))
+	res, _ = res.(Model).updateInbox(key("m"))
+	mm := res.(Model)
+	if len(mm.markedUIDs) != 2 {
+		t.Fatalf("setup: marks=%v", mm.markedUIDs)
+	}
+	res, _ = mm.Update(batchDoneMsg{removed: []removalKey{{account: "P", folder: "INBOX", uid: 5}}})
+	mm = res.(Model)
+	if !mm.markedUIDs[4] || !mm.markedUIDs[3] || len(mm.markedUIDs) != 2 {
+		t.Errorf("marks made after x must survive its completion, got %v", mm.markedUIDs)
+	}
+}
+
+// B2: U pressed while an optimistic move is still running must not pop the
+// previous undo entry.
+func TestOptimistic_UndoWaitsForInFlightMove(t *testing.T) {
+	m := instantModel(t, 3)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	older := []undoMove{{uid: 500, fromFolder: "Feed", toFolder: "Archive"}}
+	m.undoStack = [][]undoMove{older}
+	res, _ := m.updateInbox(key("x"))
+	res, cmd := res.(Model).updateInbox(key("U"))
+	mm := res.(Model)
+	if cmd != nil || mm.loading {
+		t.Error("U during an in-flight move must not start an undo")
+	}
+	if len(mm.undoStack) != 1 {
+		t.Errorf("the older undo entry must stay, got %+v", mm.undoStack)
+	}
+	if !strings.Contains(mm.status, "still in progress") || mm.isError {
+		t.Errorf("status should explain the wait, got %q (err=%v)", mm.status, mm.isError)
+	}
+	// After the move completes, U undoes it (the newest entry).
+	res, _ = mm.Update(batchDoneMsg{removed: []removalKey{{account: "P", folder: "INBOX", uid: 3}},
+		undo: []undoMove{{uid: 9, fromFolder: "INBOX", toFolder: "Trash"}}})
+	mm = res.(Model)
+	res, cmd = mm.updateInbox(key("U"))
+	mm = res.(Model)
+	if cmd == nil || len(mm.undoStack) != 1 || mm.undoStack[0][0].uid != 500 {
+		t.Errorf("after completion U must undo the just-finished move, stack=%+v", mm.undoStack)
+	}
+}
+
+// B3: a failing auto-screen MOVE reloads once with the error visible; that
+// reload must not auto-screen again (no reload→screen→fail loop).
+func TestAutoScreen_ErrorDoesNotLoop(t *testing.T) {
+	m := instantModel(t, 2)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	if err := m.screener.Block("Sender <s@example.com>"); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := m.Update(autoScreenDoneMsg{err: testErr("MOVE: NO [OVERQUOTA]"), moved: 0,
+		removed: []removalKey{{account: "P", folder: "INBOX", uid: 2}}})
+	mm := res.(Model)
+	if !mm.loading {
+		t.Fatal("setup: error must reload")
+	}
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(2, 1), folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	if got := uidsInList(mm); len(got) != 2 || mm.bulkProgress != nil || len(mm.pendingRemoval) != 0 {
+		t.Errorf("the error reload must not auto-screen again: list=%v bulk=%v", got, mm.bulkProgress)
+	}
+	if !mm.isError || !strings.Contains(mm.status, "OVERQUOTA") {
+		t.Errorf("error must stay visible, got %q", mm.status)
+	}
+	// The next load (R, tab switch, bg tick) retries normally.
+	mm.loading = true
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(2, 1), folder: "INBOX", account: "P"})
+	if got := uidsInList(res.(Model)); len(got) != 0 {
+		t.Errorf("a later load must auto-screen again, list=%v", got)
+	}
+}
+
+// B4: a screener key on a row already in its target folder writes the list
+// but does not MOVE — the row must stay.
+func TestOptimistic_ScreenInInboxKeepsRow(t *testing.T) {
+	m := instantModel(t, 3)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	res, cmd := m.updateInbox(key("I"))
+	mm := res.(Model)
+	if cmd == nil {
+		t.Fatal("I must still run (it writes the screened-in list)")
+	}
+	if got := uidsInList(mm); len(got) != 3 {
+		t.Errorf("I on an Inbox row must keep it, list=%v", got)
+	}
+	if len(mm.pendingRemoval) != 0 {
+		t.Errorf("nothing is moving, pendingRemoval=%v", mm.pendingRemoval)
+	}
+}
+
+// B5: a ↻ refresh landing while a body fetch (or T, V, …) runs is a
+// background result: marks and / filter stay, the other spinner keeps going.
+func TestCache_RefreshLandingDuringBodyFetchKeepsMarksAndSpinner(t *testing.T) {
+	m := instantModel(t, 3)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	m.refreshing = true
+	m.filterText = "s"
+	m.markedUIDs[2] = true
+	m.applyFilter()
+	m.inbox.Select(0)
+	res, _ := m.updateInbox(tea.KeyMsg{Type: tea.KeyEnter})
+	mm := res.(Model)
+	if !mm.loading {
+		t.Fatal("setup: enter should set loading")
+	}
+	res, _ = mm.Update(emailsLoadedMsg{emails: inboxRows(3, 2, 1), folder: "INBOX", account: "P"})
+	mm = res.(Model)
+	if mm.filterText == "" || !mm.markedUIDs[2] {
+		t.Errorf("background refresh wiped filter/marks: filter=%q marks=%v", mm.filterText, mm.markedUIDs)
+	}
+	if !mm.loading {
+		t.Error("the body fetch's spinner must keep running")
+	}
+	if mm.refreshing {
+		t.Error("↻ must end")
+	}
+	// A spinner reload (R) is never mistaken for a ↻ result.
+	m = instantModel(t, 3)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	m.refreshing = true
+	res, _ = m.updateInbox(key("R"))
+	if mm := res.(Model); mm.refreshing || !mm.loading {
+		t.Errorf("R must be a pure spinner load: loading=%v refreshing=%v", mm.loading, mm.refreshing)
+	}
+}
+
+// B6: the bg sync caches the Inbox WITHOUT the rows it is about to screen.
+func TestCache_BgInboxSnapshotExcludesScreenedRows(t *testing.T) {
+	m := instantModel(t, 1)
+	m.clients = []*imap.Client{imap.New(imap.Config{})}
+	m.activeFolderI = 1 // on ToScreen
+	if err := m.screener.Block("Sender <s@example.com>"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.screener.Approve("Friend <f@example.com>"); err != nil {
+		t.Fatal(err)
+	}
+	rows := inboxRows(2, 1)
+	rows[1].From = "Friend <f@example.com>" // uid 1 stays in Inbox
+	m.bgSyncInProgress = true
+	_, cmd := m.Update(bgInboxFetchedMsg{emails: rows, account: "P"})
+	res, _ := m.Update(bgInboxFetchedMsg{emails: rows, account: "P"})
+	mm := res.(Model)
+	if cmd == nil {
+		t.Fatal("setup: uid 2 must be screened out")
+	}
+	snap := mm.folderCache[cacheKey("P", "INBOX")]
+	if len(snap.emails) != 1 || snap.emails[0].UID != 1 {
+		var u []uint32
+		for _, e := range snap.emails {
+			u = append(u, e.UID)
+		}
+		t.Errorf("cached Inbox = %v, want only [1]", u)
+	}
+}
+
+// B7: the header hint names the key that clears marks (ctrl+u; U is undo).
+func TestInboxHeaderMarkHintNamesCtrlU(t *testing.T) {
+	m := instantModel(t, 2)
+	m.markedUIDs[1] = true
+	v := m.viewInbox()
+	if !strings.Contains(v, "ctrl+u to clear") || strings.Contains(v, "U to clear]") {
+		t.Errorf("mark hint must say ctrl+u, got header:\n%s", v)
+	}
+}
