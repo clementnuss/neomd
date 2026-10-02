@@ -34,10 +34,22 @@ checksum:
 
 changelog:
   sort: asc
+  abbrev: 7
   filters:
     exclude:
       - "^docs:"
       - "^test:"
       - "^chore:"
+      - "^plan:"
+      - "^spec:"
       - Merge pull request
       - Merge branch
+  groups:
+    - title: Speed & IMAP
+      regexp: '^(imap|imap/ui|ui/imap)[:/]'
+      order: 0
+    - title: UI
+      regexp: '^ui[:/]'
+      order: 1
+    - title: Other
+      order: 999
