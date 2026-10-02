@@ -195,11 +195,15 @@ type (
 	// attachmentFetchedMsg carries a lazily downloaded attachment part
 	// (large mail leaves attachments on the server until asked for) and the
 	// action to run once its data is in place: "open", "ics", "rsvp:a|d|t".
+	// folder+uid name the email the download was started on; a result for
+	// any other email (the user opened another one meanwhile) is dropped.
 	attachmentFetchedMsg struct {
-		idx  int
-		data []byte
-		err  error
-		then string
+		folder string
+		uid    uint32
+		idx    int
+		data   []byte
+		err    error
+		then   string
 	}
 	emlDownloadedMsg struct {
 		path string
@@ -1176,10 +1180,10 @@ func (m Model) fetchAttachmentCmd(idx int, then string) tea.Cmd {
 	folder, uid, part := m.openEmail.Folder, m.openEmail.UID, m.openAttachments[idx].Part
 	return func() tea.Msg {
 		if cli == nil {
-			return attachmentFetchedMsg{idx: idx, then: then, err: fmt.Errorf("no IMAP connection")}
+			return attachmentFetchedMsg{folder: folder, uid: uid, idx: idx, then: then, err: fmt.Errorf("no IMAP connection")}
 		}
 		data, err := cli.FetchPart(nil, folder, uid, part)
-		return attachmentFetchedMsg{idx: idx, data: data, err: err, then: then}
+		return attachmentFetchedMsg{folder: folder, uid: uid, idx: idx, data: data, err: err, then: then}
 	}
 }
 
@@ -1551,6 +1555,10 @@ func writeAttachmentsTemp(files []imap.Attachment) ([]string, error) {
 	paths := make([]string, 0, len(files))
 	used := make(map[string]bool)
 	for _, a := range files {
+		if attachmentOnServer(a) {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("attachment %q not downloaded", a.Filename)
+		}
 		base := filepath.Base(a.Filename)
 		if base == "" || base == "." || base == ".." || base == "/" || strings.ContainsRune(base, os.PathSeparator) {
 			base = "attachment"
@@ -2945,6 +2953,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, requeueCleanup
 
 	case attachmentFetchedMsg:
+		if m.openEmail == nil || m.openEmail.UID != msg.uid || m.openEmail.Folder != msg.folder {
+			return m, nil // started on another email; never apply it to this one
+		}
 		if msg.err != nil {
 			m.status = "Attachment download: " + msg.err.Error()
 			m.isError = true
@@ -2966,6 +2977,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.sendRSVPCmd(calendar.StatusDeclined)
 		case "rsvp:t":
 			return m, m.sendRSVPCmd(calendar.StatusTentative)
+		case "draft":
+			return m.continueDraft() // downloads the next missing part, or opens the editor
 		}
 		return m, nil
 
@@ -5583,6 +5596,16 @@ func (m Model) cleanupRequeuedCmd(r requeueRef) tea.Cmd {
 func (m Model) continueDraft() (tea.Model, tea.Cmd) {
 	if m.openEmail == nil {
 		return m, nil
+	}
+	// Large mail leaves big attachments on the server (Data nil). Download
+	// each one first — writing nil Data would attach a 0-byte file and the
+	// requeue cleanup would then trash the good original.
+	for i, a := range m.openAttachments {
+		if attachmentOnServer(a) {
+			m.status = downloadingStatus(a)
+			m.isError = false
+			return m, m.fetchAttachmentCmd(i, "draft")
+		}
 	}
 	e := m.openEmail
 	// Track the original when it is a WORKING COPY — a queued send-later
