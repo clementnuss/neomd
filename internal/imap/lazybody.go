@@ -8,12 +8,14 @@ package imap
 // presses 1–9, forwards, opens an .ics or renders inline images.
 //
 // For a multipart/mixed message at or above lazyBodyThreshold, FetchBodyOf
-// fetches only the top-level header, the "body root" (the first non-attachment
-// text/multipart child — the alternative/related tree with text, HTML and
-// inline signature images) and any small sibling part, in ONE FETCH. The root
-// is reassembled into a standalone message so the existing parseBody runs
-// unchanged. Large siblings become Attachment entries with metadata only
-// (Data == nil, Part set); FetchPart downloads one on demand.
+// keeps every top-level child except the big ones: the body root (the first
+// non-attachment text/multipart child) and every child of at most
+// lazyPartEagerMax come in ONE FETCH and are reassembled into a synthetic
+// multipart/mixed message, so the existing parseBody sees the original
+// structure minus the dropped parts — plain+HTML siblings, inline cid images,
+// calendar parts and attachment names behave exactly as on the full fetch.
+// Big children become Attachment entries with metadata only (Data == nil,
+// Part set); FetchPart downloads one on demand.
 //
 // Everything else (small mail, non-mixed structure, no BODYSTRUCTURE) takes
 // the full-fetch path exactly as before.
@@ -42,34 +44,34 @@ const (
 	lazyPartEagerMax = 256 << 10 // 256 KB
 )
 
-// lazyPlan is what a multipart/mixed BODYSTRUCTURE lets us skip.
+// lazyPlan splits a multipart/mixed message's top-level children into the
+// ones fetched with the body and the big ones left on the server.
 type lazyPlan struct {
-	root   []int      // section path of the body root under the mixed container
-	others []lazyPart // every other top-level child
+	kept    [][]int      // section paths fetched with the body, in message order
+	dropped []Attachment // metadata only (Data nil, Part set)
 }
 
-type lazyPart struct {
-	att   Attachment // metadata; Data filled only when eager
-	eager bool       // small enough to fetch together with the body
-}
-
-// planLazy returns nil when bs is not a multipart/mixed container with an
-// identifiable body root; callers then fall back to the full fetch.
+// planLazy returns nil — callers then take the full fetch — when bs is not
+// a multipart/mixed container with an identifiable body root, or when no
+// child is big enough to be worth leaving on the server.
 func planLazy(bs imap.BodyStructure) *lazyPlan {
 	mp, ok := bs.(*imap.BodyStructureMultiPart)
 	if !ok || !strings.EqualFold(mp.Subtype, "mixed") {
 		return nil
 	}
 	plan := &lazyPlan{}
+	rootSeen := false
 	for i, child := range mp.Children {
 		path := []int{i + 1}
-		if plan.root == nil && isBodyRoot(child) {
-			plan.root = path
+		isRoot := !rootSeen && isBodyRoot(child)
+		rootSeen = rootSeen || isRoot
+		if isRoot || subtreeSize(child) <= lazyPartEagerMax {
+			plan.kept = append(plan.kept, path)
 			continue
 		}
-		plan.others = append(plan.others, lazyPartOf(path, child))
+		plan.dropped = append(plan.dropped, droppedAttachment(path, child))
 	}
-	if plan.root == nil {
+	if !rootSeen || len(plan.dropped) == 0 {
 		return nil
 	}
 	return plan
@@ -92,30 +94,38 @@ func isBodyRoot(bs imap.BodyStructure) bool {
 	return false
 }
 
-func lazyPartOf(path []int, bs imap.BodyStructure) lazyPart {
+// subtreeSize is the summed transfer size of every single part in bs.
+func subtreeSize(bs imap.BodyStructure) uint32 {
 	switch p := bs.(type) {
 	case *imap.BodyStructureSinglePart:
-		ctype := strings.ToLower(p.MediaType())
-		name := p.Filename()
-		return lazyPart{
-			att: Attachment{
-				Filename:         name,
-				ContentType:      ctype,
-				ContentID:        strings.Trim(p.ID, "<>"),
-				IsCalendarInvite: isCalendarPart(ctype, name),
-				Size:             p.Size,
-				Part:             path,
-			},
-			eager: p.Size <= lazyPartEagerMax,
-		}
+		return p.Size
 	case *imap.BodyStructureMultiPart:
-		name := ""
-		if d := p.Disposition(); d != nil {
-			name = d.Params["filename"]
+		var n uint32
+		for _, c := range p.Children {
+			n += subtreeSize(c)
 		}
-		return lazyPart{att: Attachment{Filename: name, ContentType: strings.ToLower(p.MediaType()), Part: path}}
+		return n
 	}
-	return lazyPart{att: Attachment{Part: path}}
+	return 0
+}
+
+// droppedAttachment is the metadata-only Attachment for a child left on the
+// server.
+func droppedAttachment(path []int, bs imap.BodyStructure) Attachment {
+	att := Attachment{Size: subtreeSize(bs), Part: path}
+	switch p := bs.(type) {
+	case *imap.BodyStructureSinglePart:
+		att.ContentType = strings.ToLower(p.MediaType())
+		att.Filename = p.Filename()
+		att.ContentID = strings.Trim(p.ID, "<>")
+	case *imap.BodyStructureMultiPart:
+		att.ContentType = strings.ToLower(p.MediaType())
+		if d := p.Disposition(); d != nil {
+			att.Filename = d.Params["filename"]
+		}
+	}
+	att.IsCalendarInvite = isCalendarPart(att.ContentType, att.Filename)
+	return att
 }
 
 // sectionKey identifies a fetched section regardless of pointer identity.
@@ -123,23 +133,46 @@ func sectionKey(s *imap.FetchItemBodySection) string {
 	return fmt.Sprintf("%s/%v", s.Specifier, s.Part)
 }
 
-// reassembleRoot builds a standalone RFC 5322 message from the top-level
-// header, the root part's MIME header and the root part's body: the top
-// header keeps From/To/Subject/Date/List-*/References… while its Content-*
-// fields are replaced by the root's, so parseBody sees exactly the text tree.
-func reassembleRoot(top, rootMIME, body []byte) []byte {
+// lazyBoundary separates the kept children in the synthetic message.
+const lazyBoundary = "=_neomd_lazy_"
+
+// keptPart is one fetched top-level child: its MIME header and raw body.
+type keptPart struct {
+	mime, body []byte
+}
+
+// reassembleKept builds a synthetic multipart/mixed message from the
+// top-level header and the kept children: the top header keeps
+// From/To/Subject/Date/List-*/References… while its Content-* fields are
+// replaced by a multipart/mixed type with lazyBoundary, so parseBody sees
+// the original structure minus the dropped parts.
+func reassembleKept(top []byte, parts []keptPart) []byte {
 	th := readHeaderLenient(top)
-	rh := readHeaderLenient(rootMIME)
 	for _, k := range []string{"Content-Type", "Content-Transfer-Encoding", "Content-Disposition", "Content-Id", "Content-Description", "Content-Location"} {
 		th.Del(k)
 	}
-	fields := rh.Fields()
-	for fields.Next() {
-		th.Add(fields.Key(), fields.Value())
+	th.Set("Content-Type", `multipart/mixed; boundary="`+lazyBoundary+`"`)
+	if !th.Has("Mime-Version") {
+		th.Set("MIME-Version", "1.0")
 	}
 	var buf bytes.Buffer
 	_ = textproto.WriteHeader(&buf, th)
-	buf.Write(body)
+	for _, p := range parts {
+		buf.WriteString("--" + lazyBoundary + "\r\n")
+		buf.Write(p.mime)
+		switch {
+		case bytes.HasSuffix(p.mime, []byte("\r\n\r\n")), bytes.HasSuffix(p.mime, []byte("\n\n")):
+		case bytes.HasSuffix(p.mime, []byte("\r\n")), bytes.HasSuffix(p.mime, []byte("\n")):
+			buf.WriteString("\r\n")
+		default:
+			buf.WriteString("\r\n\r\n")
+		}
+		buf.Write(p.body)
+		// The CRLF before a delimiter belongs to the delimiter, not to the
+		// part: BODY[n] ends where that CRLF starts, so always add one.
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("--" + lazyBoundary + "--\r\n")
 	return buf.Bytes()
 }
 
@@ -188,22 +221,17 @@ func (c *Client) FetchBodyOf(ctx context.Context, folder string, uid uint32, siz
 	var markdown, rawHTML, webURL, references string
 	var attachments []Attachment
 	var spyPixels SpyPixelInfo
+	incomplete := false
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
-		attachments = nil // reset on retry
+		attachments, incomplete = nil, false // reset on retry
 		if err := c.selectMailbox(folder); err != nil {
 			return err
 		}
-		sections := []*imap.FetchItemBodySection{
-			{Specifier: imap.PartSpecifierHeader, Peek: true},
-			{Part: plan.root, Specifier: imap.PartSpecifierMIME, Peek: true},
-			{Part: plan.root, Peek: true},
-		}
-		for _, p := range plan.others {
-			if p.eager {
-				sections = append(sections,
-					&imap.FetchItemBodySection{Part: p.att.Part, Specifier: imap.PartSpecifierMIME, Peek: true},
-					&imap.FetchItemBodySection{Part: p.att.Part, Peek: true})
-			}
+		sections := []*imap.FetchItemBodySection{{Specifier: imap.PartSpecifierHeader, Peek: true}}
+		for _, path := range plan.kept {
+			sections = append(sections,
+				&imap.FetchItemBodySection{Part: path, Specifier: imap.PartSpecifierMIME, Peek: true},
+				&imap.FetchItemBodySection{Part: path, Peek: true})
 		}
 		var fetchSet imap.UIDSet
 		fetchSet.AddNum(imap.UID(uid))
@@ -218,24 +246,33 @@ func (c *Client) FetchBodyOf(ctx context.Context, folder string, uid uint32, siz
 		for _, s := range msgs[0].BodySection {
 			got[sectionKey(s.Section)] = s.Bytes
 		}
-		top := got[sectionKey(sections[0])]
-		rootMIME := got[sectionKey(sections[1])]
-		rootBody, ok := got[sectionKey(sections[2])]
+		top, ok := got[sectionKey(sections[0])]
 		if !ok || len(top) == 0 {
-			return fmt.Errorf("FETCH body parts uid=%d: server returned no root section", uid)
+			incomplete = true
+			return nil
 		}
-		markdown, rawHTML, webURL, attachments, references, spyPixels = parseBody(reassembleRoot(top, rootMIME, rootBody))
-		for _, p := range plan.others {
-			att := p.att
-			if p.eager {
-				mime := got[sectionKey(&imap.FetchItemBodySection{Part: att.Part, Specifier: imap.PartSpecifierMIME})]
-				body := got[sectionKey(&imap.FetchItemBodySection{Part: att.Part})]
-				att.Data = decodePart(mime, body)
+		parts := make([]keptPart, 0, len(plan.kept))
+		for _, path := range plan.kept {
+			mime, okM := got[sectionKey(&imap.FetchItemBodySection{Part: path, Specifier: imap.PartSpecifierMIME})]
+			body, okB := got[sectionKey(&imap.FetchItemBodySection{Part: path})]
+			if !okM || !okB {
+				// A server that does not echo a section exactly as asked:
+				// never guess — take the full fetch below.
+				incomplete = true
+				return nil
 			}
+			parts = append(parts, keptPart{mime: mime, body: body})
+		}
+		markdown, rawHTML, webURL, attachments, references, spyPixels = parseBody(reassembleKept(top, parts))
+		for _, att := range plan.dropped {
+			att.Part = append([]int(nil), att.Part...)
 			attachments = append(attachments, att)
 		}
 		return nil
 	})
+	if err == nil && incomplete {
+		return c.FetchBody(ctx, folder, uid)
+	}
 	return markdown, rawHTML, webURL, attachments, references, spyPixels, err
 }
 
