@@ -353,6 +353,7 @@ make daemon            build and run headless (--headless); screener loop, no TU
 make demo / demo-hp    run with demo configs
 make benchmark         IMAP latency benchmark for Hostpoint and Gmail
 make android           cross-compile ARM64 for Termux
+make release-notes VERSION=v0.1.0  draft RELEASE_NOTES.md with Claude Code (review, then commit)
 make release VERSION=v0.1.0  tag and push a new release
 make clean             remove compiled binary
 make help              print this list

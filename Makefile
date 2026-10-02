@@ -128,9 +128,24 @@ clean:
 ## release: tag and push a new release (usage: make release VERSION=v0.1.0)
 release: docs docs-build
 	@test -n "$(VERSION)" || (echo "Usage: make release VERSION=v0.1.0" && exit 1)
+	@PREV=$$(git describe --tags --abbrev=0); \
+	if git cat-file -e "$$PREV:RELEASE_NOTES.md" 2>/dev/null && git diff --quiet "$$PREV" -- RELEASE_NOTES.md; then \
+	  echo "RELEASE_NOTES.md is unchanged since $$PREV — run: make release-notes VERSION=$(VERSION)"; exit 1; fi
+	@git diff --quiet HEAD -- RELEASE_NOTES.md || (echo "RELEASE_NOTES.md has uncommitted changes — review and commit them first" && exit 1)
 	git tag -a $(VERSION) -m "Release $(VERSION)"
 	git push origin $(VERSION)
 	@echo "Tagged $(VERSION) — GitHub Actions will build and publish the release."
+
+## release-notes: draft RELEASE_NOTES.md for VERSION with Claude Code from CHANGELOG.md + commits since the last tag (PREV=vX.Y.Z to override); review, then commit it
+release-notes:
+	@test -n "$(VERSION)" || (echo "Usage: make release-notes VERSION=v0.1.0 [PREV=v0.0.9]" && exit 1)
+	@command -v claude >/dev/null || (echo "claude CLI not found — install Claude Code or write RELEASE_NOTES.md by hand" && exit 1)
+	@PREV="$(PREV)"; test -n "$$PREV" || PREV=$$(git describe --tags --abbrev=0); \
+	echo "Drafting RELEASE_NOTES.md for $(VERSION) (changes since $$PREV)…"; \
+	sed -e "s/{{VERSION}}/$(VERSION)/g" -e "s/{{PREV}}/$$PREV/g" scripts/release-notes-prompt.md \
+	  | env -u ANTHROPIC_API_KEY claude -p --allowedTools "Read,Write,Bash(git log:*),Bash(git diff:*),Bash(git describe:*),Bash(head:*)"
+	@# env -u ANTHROPIC_API_KEY: use the Claude Code login, not a stray API key from the shell
+	@echo; echo "Review RELEASE_NOTES.md, then: git add RELEASE_NOTES.md && git commit -m 'release notes $(VERSION)'"
 
 ## docs: regenerate keybindings section in README.md from internal/ui/keys.go
 docs:

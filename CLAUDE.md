@@ -18,7 +18,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `make daemon` — build and run headless (`./neomd --headless`); screener loop only, no TUI
 - `make benchmark` — IMAP latency benchmark (requires `IMAP_PASS_SIMU`, `IMAP_APPPASS_GMAIL_NEOMD` env vars)
 - `make android` — cross-compile ARM64 for Termux
-- `make release VERSION=v0.1.0` — tag and push a new release (runs docs build, GitHub Actions handles publishing)
+- `make release-notes VERSION=v0.1.0` — drafts `RELEASE_NOTES.md` ("## What has changed?" + Highlights + Fixes) with Claude Code (`claude -p`, prompt in `scripts/release-notes-prompt.md`) from `CHANGELOG.md` and commits since the last tag; review and commit it
+- `make release VERSION=v0.1.0` — tag and push a new release (runs docs build, GitHub Actions handles publishing; refuses if `RELEASE_NOTES.md` is unchanged since the last tag or uncommitted). The workflow puts `RELEASE_NOTES.md` on top of the release body, goreleaser's grouped changelog below
 - Single test: `go test ./internal/smtp -run TestBuildMessage`
 
 Requires Go 1.22+. Binary version is injected via `-ldflags -X main.version=$(git describe)`.
