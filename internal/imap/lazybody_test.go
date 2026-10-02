@@ -376,3 +376,27 @@ func TestLazy_PlanNilWhenEveryChildIsSmall(t *testing.T) {
 		t.Errorf("all children small: plan must be nil, got %+v", p)
 	}
 }
+
+// A kept part whose body carries our synthetic delimiter would split wrongly;
+// the lazy path must fall back to the full fetch and render identically.
+func TestMem_FetchBodyOf_BoundaryCollisionFallsBack(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	raw, _ := bigMixedMessage(1200 * 1024)
+	raw = bytes.Replace(raw, []byte("Hello =C3=A4 world"), []byte("line\r\n--"+lazyBoundary+"\r\nHello =C3=A4 world"), 1)
+	seedRaw(t, user, "INBOX", raw)
+	ctx := context.Background()
+	hdrs, _ := cli.FetchHeaders(ctx, "INBOX", 10)
+	e := hdrs[0]
+	fullMD, _, _, fullAtt, _, _, err := cli.FetchBody(ctx, "INBOX", e.UID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lazyMD, _, _, lazyAtt, _, _, err := cli.FetchBodyOf(ctx, "INBOX", e.UID, e.Size, e.BodyStructure)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lazyMD != fullMD || len(lazyAtt) != len(fullAtt) || lazyAtt[len(lazyAtt)-1].Data == nil {
+		t.Errorf("collision must fall back to the full fetch: md equal=%v att lazy=%d full=%d lastData=%d",
+			lazyMD == fullMD, len(lazyAtt), len(fullAtt), len(lazyAtt[len(lazyAtt)-1].Data))
+	}
+}

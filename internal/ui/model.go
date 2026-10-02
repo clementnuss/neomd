@@ -198,12 +198,13 @@ type (
 	// folder+uid name the email the download was started on; a result for
 	// any other email (the user opened another one meanwhile) is dropped.
 	attachmentFetchedMsg struct {
-		folder string
-		uid    uint32
-		idx    int
-		data   []byte
-		err    error
-		then   string
+		account string
+		folder  string
+		uid     uint32
+		idx     int
+		data    []byte
+		err     error
+		then    string
 	}
 	emlDownloadedMsg struct {
 		path string
@@ -1184,13 +1185,14 @@ func (m Model) fetchAttachmentCmd(idx int, then string) tea.Cmd {
 		return nil
 	}
 	cli := m.imapCli()
+	account := m.activeAccountName()
 	folder, uid, part := m.openEmail.Folder, m.openEmail.UID, m.openAttachments[idx].Part
 	return func() tea.Msg {
 		if cli == nil {
-			return attachmentFetchedMsg{folder: folder, uid: uid, idx: idx, then: then, err: fmt.Errorf("no IMAP connection")}
+			return attachmentFetchedMsg{account: account, folder: folder, uid: uid, idx: idx, then: then, err: fmt.Errorf("no IMAP connection")}
 		}
 		data, err := cli.FetchPart(nil, folder, uid, part)
-		return attachmentFetchedMsg{folder: folder, uid: uid, idx: idx, data: data, err: err, then: then}
+		return attachmentFetchedMsg{account: account, folder: folder, uid: uid, idx: idx, data: data, err: err, then: then}
 	}
 }
 
@@ -2717,8 +2719,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case emailsLoadedMsg:
-		skipAutoScreen := m.skipAutoScreenOnce // consumed by the next load, whatever it is
-		m.skipAutoScreenOnce = false
+		// Consumed only by an applied Inbox load (set by the error reload
+		// after a failed auto-screen MOVE); a stray result for another folder
+		// or a cached-only result must not use it up.
+		skipAutoScreen := m.skipAutoScreenOnce
+		if msg.folder == m.cfg.Folders.Inbox && msg.folder == m.activeFolder() {
+			m.skipAutoScreenOnce = false
+		}
 		msg.emails = m.withPendingSeen(msg.account, m.withoutPending(msg.account, msg.emails))
 		if m.folderCache == nil {
 			m.folderCache = make(map[string]folderSnapshot)
@@ -3011,8 +3018,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, requeueCleanup
 
 	case attachmentFetchedMsg:
-		if m.openEmail == nil || m.openEmail.UID != msg.uid || m.openEmail.Folder != msg.folder {
-			return m, nil // started on another email; never apply it to this one
+		if m.openEmail == nil || m.openEmail.UID != msg.uid || m.openEmail.Folder != msg.folder ||
+			(msg.account != "" && msg.account != m.activeAccountName()) {
+			return m, nil // started on another email (or account); never apply it to this one
 		}
 		if msg.err != nil {
 			m.status = "Attachment download: " + msg.err.Error()
@@ -3036,6 +3044,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "rsvp:t":
 			return m, m.sendRSVPCmd(calendar.StatusTentative)
 		case "draft":
+			// Only continue while the user is still in the reader: after q,
+			// or with a new compose open, re-entering continueDraft would
+			// reset the compose state and open the editor unasked.
+			if m.state != stateReading {
+				m.status = "Download finished — press E again to continue the draft"
+				return m, nil
+			}
 			return m.continueDraft() // downloads the next missing part, or opens the editor
 		}
 		return m, nil

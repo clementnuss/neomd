@@ -182,3 +182,29 @@ func TestWriteAttachmentsTemp_RefusesServerSideAttachment(t *testing.T) {
 		t.Errorf("an attachment still on the server must be refused, got %v", err)
 	}
 }
+
+// A "draft" continuation that lands after the user left the reader (or opened
+// a new compose) must not reset compose state and open the editor unasked.
+func TestLazyAttachment_DraftContinuationOnlyInReader(t *testing.T) {
+	m := readerModelWithLazyAttachment(t)
+	m.state = stateInbox // user pressed q while the download was in flight
+	res, cmd := m.Update(attachmentFetchedMsg{account: "P", folder: "INBOX", uid: 1, idx: 0, data: []byte("%PDF"), then: "draft"})
+	mm := res.(Model)
+	if cmd != nil || mm.state != stateInbox {
+		t.Errorf("continuation outside the reader must not open the editor: state=%v cmd=%v", mm.state, cmd != nil)
+	}
+	if !strings.Contains(mm.status, "press E again") {
+		t.Errorf("status should tell the user to press E again, got %q", mm.status)
+	}
+}
+
+// A download started under account P must not land on account W's email
+// that shares folder name and UID.
+func TestLazyAttachment_DownloadIgnoredAfterAccountSwitch(t *testing.T) {
+	m := readerModelWithLazyAttachment(t)
+	res, _ := m.Update(attachmentFetchedMsg{account: "W", folder: "INBOX", uid: 1, idx: 0, data: []byte("%PDF-W"), then: "open"})
+	mm := res.(Model)
+	if mm.openAttachments[0].Data != nil {
+		t.Error("a download tagged with another account must be ignored")
+	}
+}

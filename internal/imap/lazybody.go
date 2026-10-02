@@ -261,6 +261,12 @@ func (c *Client) FetchBodyOf(ctx context.Context, folder string, uid uint32, siz
 				incomplete = true
 				return nil
 			}
+			if bytes.Contains(mime, []byte("--"+lazyBoundary)) || bytes.Contains(body, []byte("--"+lazyBoundary)) {
+				// A kept part that itself carries our delimiter would split
+				// wrongly in the synthetic message — take the full fetch.
+				incomplete = true
+				return nil
+			}
 			parts = append(parts, keptPart{mime: mime, body: body})
 		}
 		markdown, rawHTML, webURL, attachments, references, spyPixels = parseBody(reassembleKept(top, parts))
