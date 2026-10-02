@@ -32,6 +32,13 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+# Release body = RELEASE_NOTES.md ("## What has changed?", written per
+# release) followed by the grouped commit changelog below.
+release:
+  header:
+    from_file:
+      path: ./RELEASE_NOTES.md
+
 changelog:
   sort: asc
   abbrev: 7
