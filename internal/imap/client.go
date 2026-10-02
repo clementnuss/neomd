@@ -37,8 +37,10 @@ type Attachment struct {
 	Filename         string // from Content-Disposition filename or Content-Type name param
 	ContentType      string // e.g. "application/pdf"
 	ContentID        string // Content-ID without angle brackets (for inline cid: references)
-	Data             []byte
-	IsCalendarInvite bool // true for text/calendar parts or filenames ending in .ics
+	Data             []byte // nil when the part was left on the server (see Part)
+	IsCalendarInvite bool   // true for text/calendar parts or filenames ending in .ics
+	Size             uint32 // transfer size from BODYSTRUCTURE (0 when unknown)
+	Part             []int  // IMAP section path for FetchPart; set only by the lazy body fetch
 }
 
 type Email struct {
@@ -60,6 +62,9 @@ type Email struct {
 	InReplyTo     string    // first In-Reply-To message ID (for threading)
 	References    string    // References header (space-separated Message-IDs for threading)
 	SendAt        time.Time // parsed X-Neomd-Send-At — non-zero only for send-later queued messages
+	// BodyStructure is the BODYSTRUCTURE already fetched with the headers; it
+	// lets FetchBodyOf skip attachments on large mail without another round trip.
+	BodyStructure imap.BodyStructure `json:"-"`
 }
 
 // Config holds connection parameters.
@@ -519,6 +524,7 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 			}
 			e.Size = uint32(m.RFC822Size)
 			e.HasAttachment = hasAttachment(m.BodyStructure)
+			e.BodyStructure = m.BodyStructure
 			emails = append(emails, e)
 		}
 		return nil
@@ -993,6 +999,7 @@ func (c *Client) FetchHeadersByUID(ctx context.Context, folder string, uids []ui
 			}
 			e.Size = uint32(m.RFC822Size)
 			e.HasAttachment = hasAttachment(m.BodyStructure)
+			e.BodyStructure = m.BodyStructure
 			emails = append(emails, e)
 		}
 		return nil

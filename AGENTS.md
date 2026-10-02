@@ -448,6 +448,16 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 
 ## Reading & Security
 
+- **Large mail fetches text first; `Attachment.Data` may be nil** — `FetchBodyOf`
+  (`internal/imap/lazybody.go`) fetches only the body root plus small siblings for a
+  `multipart/mixed` message ≥ 1 MB and returns big attachments as metadata (`Data == nil`,
+  `Part` set, `Size` from BODYSTRUCTURE). Every consumer of `Attachment.Data` must go
+  through `attachmentOnServer` → `fetchAttachmentCmd` → `attachmentFetchedMsg` (reader
+  `1`–`9`, `<space> v` chord) or tolerate nil (inline images, calendar card). `FetchBody`,
+  `.eml` download, headers view, draft reopen and the daemon keep the full raw fetch.
+  `FetchHeaders` keeps the BODYSTRUCTURE on `imap.Email` so the lazy path costs no extra
+  round trip. Tests: `TestLazy_*`, `TestMem_FetchBodyOf_*`,
+  `TestIntegration_LazyBodyOnRealServer`, `TestLazyAttachment_*`.
 - **Spy pixels blocked** — two layers: curated denylist with attribution
   (`internal/imap/tracker_list.go`) + generic 1×1 heuristic; glamour never fetches remote
   resources; results cached in `~/.cache/neomd/spy_pixels` (`+key` spy / `-key` clean).

@@ -133,7 +133,11 @@ func renderEmailHeader(e *imap.Email, attachments []imap.Attachment, spyPixels i
 	if len(attachments) > 0 {
 		var parts []string
 		for i, a := range attachments {
-			parts = append(parts, attachStyle.Render(fmt.Sprintf("[%d] %s", i+1, a.Filename)))
+			label := fmt.Sprintf("[%d] %s", i+1, a.Filename)
+			if s := attachSize(a.Size); s != "" {
+				label += " (" + s + ")"
+			}
+			parts = append(parts, attachStyle.Render(label))
 		}
 		lines = append(lines, styleDate.Render("Attach:  ")+strings.Join(parts, "  "))
 	}
@@ -153,6 +157,21 @@ func renderEmailHeader(e *imap.Email, attachments []imap.Attachment, spyPixels i
 
 	content := strings.Join(lines, "\n")
 	return styleEmailMeta.Render(content) + "\n"
+}
+
+// attachSize formats an attachment's transfer size for the reader header;
+// empty when unknown (the full body fetch does not record sizes).
+func attachSize(b uint32) string {
+	switch {
+	case b == 0:
+		return ""
+	case b < 1024:
+		return fmt.Sprintf("%d B", b)
+	case b < 1024*1024:
+		return fmt.Sprintf("%.0f KB", float64(b)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
+	}
 }
 
 // calendarInviteCard renders a one-line summary of an iCalendar invite if one

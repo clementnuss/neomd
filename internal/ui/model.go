@@ -192,6 +192,15 @@ type (
 		dangerous bool   // true if file was saved but NOT auto-opened
 		reason    string // why it was flagged (shown in status bar)
 	}
+	// attachmentFetchedMsg carries a lazily downloaded attachment part
+	// (large mail leaves attachments on the server until asked for) and the
+	// action to run once its data is in place: "open", "ics", "rsvp:a|d|t".
+	attachmentFetchedMsg struct {
+		idx  int
+		data []byte
+		err  error
+		then string
+	}
 	emlDownloadedMsg struct {
 		path string
 		err  error
@@ -1141,12 +1150,45 @@ func (m Model) fetchFolderCmd(folder string) tea.Cmd {
 
 func (m Model) fetchBodyCmd(e *imap.Email) tea.Cmd {
 	return func() tea.Msg {
-		body, rawHTML, webURL, attachments, references, spyPixels, err := m.imapCli().FetchBody(nil, e.Folder, e.UID)
+		// Large multipart/mixed mail fetches its text tree only; big
+		// attachments come back as metadata and are downloaded on 1–9.
+		body, rawHTML, webURL, attachments, references, spyPixels, err := m.imapCli().FetchBodyOf(nil, e.Folder, e.UID, e.Size, e.BodyStructure)
 		if err != nil {
 			return errMsg{err}
 		}
 		return bodyLoadedMsg{email: e, body: body, rawHTML: rawHTML, webURL: webURL, attachments: attachments, references: references, spyPixels: spyPixels}
 	}
+}
+
+// attachmentOnServer reports an attachment the lazy body fetch left on the
+// server: it must be downloaded with fetchAttachmentCmd before use.
+func attachmentOnServer(a imap.Attachment) bool {
+	return a.Data == nil && len(a.Part) > 0
+}
+
+// fetchAttachmentCmd downloads attachment idx of the open email and reports
+// attachmentFetchedMsg with the action to continue (then).
+func (m Model) fetchAttachmentCmd(idx int, then string) tea.Cmd {
+	if m.openEmail == nil || idx < 0 || idx >= len(m.openAttachments) {
+		return nil
+	}
+	cli := m.imapCli()
+	folder, uid, part := m.openEmail.Folder, m.openEmail.UID, m.openAttachments[idx].Part
+	return func() tea.Msg {
+		if cli == nil {
+			return attachmentFetchedMsg{idx: idx, then: then, err: fmt.Errorf("no IMAP connection")}
+		}
+		data, err := cli.FetchPart(nil, folder, uid, part)
+		return attachmentFetchedMsg{idx: idx, data: data, err: err, then: then}
+	}
+}
+
+// downloadingStatus is the status line shown while a lazy attachment loads.
+func downloadingStatus(a imap.Attachment) string {
+	if s := attachSize(a.Size); s != "" {
+		return fmt.Sprintf("Downloading %s (%s)…", a.Filename, s)
+	}
+	return fmt.Sprintf("Downloading %s…", a.Filename)
 }
 
 func (m Model) sendEmailCmd(smtpAcct config.AccountConfig, from, to, cc, bcc, subject, body string, attachments []string, includeHTMLSig bool, replyToUID uint32, replyToFolder, replyToAccount, inReplyTo, references string) tea.Cmd {
@@ -2901,6 +2943,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.inbox.SetItems(items)
 		}
 		return m, requeueCleanup
+
+	case attachmentFetchedMsg:
+		if msg.err != nil {
+			m.status = "Attachment download: " + msg.err.Error()
+			m.isError = true
+			return m, nil
+		}
+		if msg.idx < 0 || msg.idx >= len(m.openAttachments) {
+			return m, nil // the reader moved on; nothing to attach the data to
+		}
+		m.openAttachments[msg.idx].Data = msg.data
+		m.status = ""
+		switch msg.then {
+		case "open":
+			return m, m.downloadOpenAttachmentCmd(m.openAttachments[msg.idx])
+		case "ics":
+			return m, m.openICSCmd()
+		case "rsvp:a":
+			return m, m.sendRSVPCmd(calendar.StatusAccepted)
+		case "rsvp:d":
+			return m, m.sendRSVPCmd(calendar.StatusDeclined)
+		case "rsvp:t":
+			return m, m.sendRSVPCmd(calendar.StatusTentative)
+		}
+		return m, nil
 
 	case attachOpenDoneMsg:
 		if msg.err != nil {
@@ -4695,6 +4762,21 @@ func (m Model) updateReader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "v": // <space> v {a|d|t|o} — calendar RSVP chord
+			// An invite the lazy body fetch left on the server is downloaded
+			// first; the chord continues from attachmentFetchedMsg.
+			if strings.Contains("adto", key) && key != "" {
+				for i, a := range m.openAttachments {
+					if a.IsCalendarInvite && attachmentOnServer(a) {
+						then := "rsvp:" + key
+						if key == "o" {
+							then = "ics"
+						}
+						m.status = downloadingStatus(a)
+						m.isError = false
+						return m, m.fetchAttachmentCmd(i, then)
+					}
+				}
+			}
 			switch key {
 			case "a":
 				return m, m.sendRSVPCmd(calendar.StatusAccepted)
@@ -4822,6 +4904,11 @@ func (m Model) updateReader(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		idx := int(msg.String()[0] - '1') // 0-based
 		if idx < len(m.openAttachments) {
+			if a := m.openAttachments[idx]; attachmentOnServer(a) {
+				m.status = downloadingStatus(a)
+				m.isError = false
+				return m, m.fetchAttachmentCmd(idx, "open")
+			}
 			return m, m.downloadOpenAttachmentCmd(m.openAttachments[idx])
 		}
 	case " ":

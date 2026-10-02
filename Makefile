@@ -81,7 +81,7 @@ test-integration:
 	NEOMD_TEST_USER=neomd.demo@ssp.sh \
 	NEOMD_TEST_PASS=$$IMAP_PASS_NEOMD_DEMO \
 	NEOMD_TEST_FROM="Neomd Demo <neomd.demo@ssp.sh>" \
-	go test ./internal/ -run TestIntegration -v -count=1 -timeout 120s
+	go test ./internal/ -run TestIntegration -v -count=1 -timeout 300s
 
 ## send-test: send a test email to sspaeti@hey.com (override: make send-test TO=other@example.com)
 send-test:
