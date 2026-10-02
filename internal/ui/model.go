@@ -571,6 +571,7 @@ type autoScreenMove struct {
 // screenMove is one MOVE of an auto-screen plan, captured by value.
 type screenMove struct {
 	uid uint32
+	src string // the email's own folder; never assumed to be Inbox
 	dst string
 }
 
@@ -581,7 +582,7 @@ type screenMove struct {
 func autoScreenPlan(moves []autoScreenMove) []screenMove {
 	plan := make([]screenMove, len(moves))
 	for i, mv := range moves {
-		plan[i] = screenMove{uid: mv.email.UID, dst: mv.dst}
+		plan[i] = screenMove{uid: mv.email.UID, src: mv.email.Folder, dst: mv.dst}
 	}
 	return plan
 }
@@ -1636,6 +1637,17 @@ func (m Model) contactNamesFor(fields ...string) string {
 }
 
 // validateScreenerSafety wraps the shared screener validation logic.
+// screenInboxOnlyStatus is shown when S / :screen are used anywhere but the
+// plain Inbox tab.
+const screenInboxOnlyStatus = "screen runs on the Inbox tab only"
+
+// onPlainInboxTab reports the Inbox tab with no Search/Thread/Everything/…
+// view on top: the only place where every loaded row is an Inbox message,
+// so S / :screen can classify and MOVE them.
+func (m Model) onPlainInboxTab() bool {
+	return m.offTabFolder == "" && m.activeFolder() == m.cfg.Folders.Inbox
+}
+
 func (m Model) validateScreenerSafety() error {
 	return screener.ValidateScreenerSafety(m.cfg.Folders)
 }
@@ -2555,13 +2567,12 @@ func folderLabelToIMAP(label string, fc config.FoldersConfig) string {
 
 // bgExecAutoScreenCmd silently moves emails and returns bgScreenDoneMsg.
 func (m Model) bgExecAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
-	src := m.cfg.Folders.Inbox
 	plan := autoScreenPlan(moves) // by value: never read mv.email in the goroutine
 	total := len(plan)
 	return func() tea.Msg {
 		moved := 0
 		for _, mv := range plan {
-			if _, err := m.bgImapCli().MoveMessage(nil, src, mv.uid, mv.dst); err != nil {
+			if _, err := m.bgImapCli().MoveMessage(nil, mv.src, mv.uid, mv.dst); err != nil {
 				break
 			}
 			moved++
@@ -2572,12 +2583,11 @@ func (m Model) bgExecAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
 
 // execAutoScreenCmd performs the IMAP moves for a pre-approved list of moves.
 func (m Model) execAutoScreenCmd(moves []autoScreenMove) tea.Cmd {
-	src := m.cfg.Folders.Inbox
 	bp := m.bulkProgress
 	plan := autoScreenPlan(moves) // by value: never read mv.email in the goroutine
 	return func() tea.Msg {
 		for i, mv := range plan {
-			if _, err := m.imapCli().MoveMessage(nil, src, mv.uid, mv.dst); err != nil {
+			if _, err := m.imapCli().MoveMessage(nil, mv.src, mv.uid, mv.dst); err != nil {
 				return autoScreenDoneMsg{moved: i, err: err}
 			}
 			if bp != nil {
@@ -2795,7 +2805,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Convert the IMAP folder name to its UI label first so allowlists
 		// written with labels (e.g. "PaperTrail") still match when the IMAP
 		// folder name is custom (e.g. "HEY/Paper Trail").
-		if m.cfg.Notifications.FolderAllowed(m.cfg.Folders.LabelFor(msg.folder)) {
+		// An Inbox load during a running bg sync skips both: the sync notifies
+		// with the real destinations of the mail it is about to move.
+		inboxDuringBgSync := msg.folder == m.cfg.Folders.Inbox && m.bgSyncInProgress
+		if !inboxDuringBgSync && m.cfg.Notifications.FolderAllowed(m.cfg.Folders.LabelFor(msg.folder)) {
 			m.maybeNotifyInbox(msg.folder, msg.emails, nil)
 		}
 		return m, tea.Batch(sortCmd, m.fetchFolderCountsCmd(), prefetchCmd)
@@ -3417,6 +3430,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.bgSyncInProgress = false
 			return m, nil
 		}
+		// Same guards as the Inbox load: auto_screen_on_load = false disables
+		// screening, and empty lists pause it (a fresh install must not move
+		// the whole Inbox to ToScreen on the first tick).
+		if !m.cfg.UI.AutoScreen() || m.screener.IsEmpty() {
+			m.maybeNotifyInbox(m.cfg.Folders.Inbox, msg.emails, nil) // nothing moves: dst is Inbox
+			m.bgSyncInProgress = false
+			return m, nil
+		}
 		if err := m.validateScreenerSafety(); err != nil {
 			m.status = err.Error()
 			m.isError = true
@@ -3959,8 +3980,10 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case "S":
-		if m.folders[m.activeFolderI] != "Inbox" {
-			break
+		if !m.onPlainInboxTab() {
+			m.status = screenInboxOnlyStatus
+			m.isError = true
+			return m, nil
 		}
 		if err := m.validateScreenerSafety(); err != nil {
 			m.status = err.Error()
