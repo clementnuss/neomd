@@ -37,8 +37,10 @@ type Attachment struct {
 	Filename         string // from Content-Disposition filename or Content-Type name param
 	ContentType      string // e.g. "application/pdf"
 	ContentID        string // Content-ID without angle brackets (for inline cid: references)
-	Data             []byte
-	IsCalendarInvite bool // true for text/calendar parts or filenames ending in .ics
+	Data             []byte // nil when the part was left on the server (see Part)
+	IsCalendarInvite bool   // true for text/calendar parts or filenames ending in .ics
+	Size             uint32 // transfer size from BODYSTRUCTURE (0 when unknown)
+	Part             []int  // IMAP section path for FetchPart; set only by the lazy body fetch
 }
 
 type Email struct {
@@ -60,6 +62,9 @@ type Email struct {
 	InReplyTo     string    // first In-Reply-To message ID (for threading)
 	References    string    // References header (space-separated Message-IDs for threading)
 	SendAt        time.Time // parsed X-Neomd-Send-At — non-zero only for send-later queued messages
+	// BodyStructure is the BODYSTRUCTURE already fetched with the headers; it
+	// lets FetchBodyOf skip attachments on large mail without another round trip.
+	BodyStructure imap.BodyStructure `json:"-"`
 }
 
 // Config holds connection parameters.
@@ -294,9 +299,35 @@ func (c *Client) selectMailbox(mailbox string) error {
 		return nil
 	}
 	if _, err := c.conn.Select(mailbox, nil).Wait(); err != nil {
+		c.selectedMailbox = "" // a failed SELECT leaves no mailbox selected (RFC 9051 §6.3.2)
 		return fmt.Errorf("SELECT %q: %w", mailbox, err)
 	}
 	c.selectedMailbox = mailbox
+	return nil
+}
+
+// beginSelect sends SELECT without waiting when folder is not the cached
+// selection, so the caller can pipeline its first command behind it (RFC
+// 9051 §5.5). Returns nil when no SELECT was needed.
+func (c *Client) beginSelect(conn *imapclient.Client, folder string) *imapclient.SelectCommand {
+	if c.selectedMailbox == folder {
+		return nil
+	}
+	return conn.Select(folder, nil)
+}
+
+// endSelect waits for a beginSelect command and records the selection only
+// on success. The caller must still Wait() its pipelined command afterwards
+// (to drain its response) even when this returns an error.
+func (c *Client) endSelect(cmd *imapclient.SelectCommand, folder string) error {
+	if cmd == nil {
+		return nil
+	}
+	if _, err := cmd.Wait(); err != nil {
+		c.selectedMailbox = ""
+		return fmt.Errorf("SELECT %q: %w", folder, err)
+	}
+	c.selectedMailbox = folder
 	return nil
 }
 
@@ -329,6 +360,10 @@ func (c *Client) Addr() string { return c.addr() }
 
 // User returns the IMAP username.
 func (c *Client) User() string { return c.cfg.User }
+
+// ConfigCopy returns the connection config so a second client (background
+// connection) can be built with identical credentials and TokenSource.
+func (c *Client) ConfigCopy() Config { return c.cfg }
 
 // Ping tests the IMAP connection by issuing a NOOP command.
 func (c *Client) Ping(ctx context.Context) error {
@@ -372,14 +407,17 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "FetchHeaders %s n=%d", folder, n)
 	var emails []Email
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		emails = nil // reset on retry to avoid duplicates
-		if err := c.selectMailbox(folder); err != nil {
+		sel := c.beginSelect(conn, folder)
+		srch := conn.UIDSearch(&imap.SearchCriteria{}, nil)
+		if err := c.endSelect(sel, folder); err != nil {
+			_, _ = srch.Wait() // drain the pipelined response
 			return err
 		}
-
-		searchData, err := conn.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+		searchData, err := srch.Wait()
 		if err != nil {
 			return fmt.Errorf("UID SEARCH: %w", err)
 		}
@@ -486,6 +524,7 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 			}
 			e.Size = uint32(m.RFC822Size)
 			e.HasAttachment = hasAttachment(m.BodyStructure)
+			e.BodyStructure = m.BodyStructure
 			emails = append(emails, e)
 		}
 		return nil
@@ -499,13 +538,17 @@ func (c *Client) SearchUIDs(ctx context.Context, folder string) ([]uint32, error
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "SearchUIDs %s", folder)
 	var uids []uint32
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		uids = nil // reset on retry
-		if err := c.selectMailbox(folder); err != nil {
+		sel := c.beginSelect(conn, folder)
+		srch := conn.UIDSearch(&imap.SearchCriteria{}, nil)
+		if err := c.endSelect(sel, folder); err != nil {
+			_, _ = srch.Wait() // drain the pipelined response
 			return err
 		}
-		searchData, err := conn.UIDSearch(&imap.SearchCriteria{}, nil).Wait()
+		searchData, err := srch.Wait()
 		if err != nil {
 			return fmt.Errorf("UID SEARCH: %w", err)
 		}
@@ -530,22 +573,34 @@ func (c *Client) FetchUnseenCounts(ctx context.Context, folders map[string]strin
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "FetchUnseenCounts %d folders", len(folders))
 	var counts map[string]int
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		counts = make(map[string]int, len(folders)) // reset on retry
+		// Send every STATUS before waiting for any: one round trip instead of
+		// one per folder. STATUS depends on nothing the client has to read first.
+		type inflight struct {
+			label string
+			cmd   *imapclient.StatusCommand
+		}
+		cmds := make([]inflight, 0, len(folders))
 		for label, mailbox := range folders {
-			data, err := conn.Status(mailbox, &imap.StatusOptions{NumUnseen: true}).Wait()
+			cmds = append(cmds, inflight{label, conn.Status(mailbox, &imap.StatusOptions{NumUnseen: true})})
+		}
+		var netErr error
+		for _, f := range cmds {
+			data, err := f.cmd.Wait()
 			if err != nil {
-				if isNetErr(err) {
-					return err // let withConnRetry reconnect
+				if isNetErr(err) && netErr == nil {
+					netErr = err // keep draining the rest, then let withConnRetry reconnect
 				}
 				continue // folder may not exist; skip
 			}
 			if data.NumUnseen != nil {
-				counts[label] = int(*data.NumUnseen)
+				counts[f.label] = int(*data.NumUnseen)
 			}
 		}
-		return nil
+		return netErr
 	})
 	return counts, err
 }
@@ -593,14 +648,17 @@ func (c *Client) searchFolder(ctx context.Context, folder string, criteria *imap
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "searchFolder %s", folder)
 	var uids []uint32
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		uids = nil // reset on retry
-		if err := c.selectMailbox(folder); err != nil {
+		sel := c.beginSelect(conn, folder)
+		srch := conn.UIDSearch(criteria, nil)
+		if err := c.endSelect(sel, folder); err != nil {
+			_, _ = srch.Wait() // drain the pipelined response
 			return err
 		}
-
-		searchData, err := conn.UIDSearch(criteria, nil).Wait()
+		searchData, err := srch.Wait()
 		if err != nil {
 			return fmt.Errorf("UID SEARCH: %w", err)
 		}
@@ -865,27 +923,31 @@ func (c *Client) FetchHeadersByUID(ctx context.Context, folder string, uids []ui
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "FetchHeadersByUID %s count=%d", folder, len(uids))
 	if len(uids) == 0 {
 		return nil, nil
 	}
 	var emails []Email
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		emails = nil // reset on retry
-		if err := c.selectMailbox(folder); err != nil {
-			return err
-		}
+		sel := c.beginSelect(conn, folder)
 		var fetchSet imap.UIDSet
 		for _, uid := range uids {
 			fetchSet.AddNum(imap.UID(uid))
 		}
-		msgs, err := conn.Fetch(fetchSet, &imap.FetchOptions{
+		fetchCmd := conn.Fetch(fetchSet, &imap.FetchOptions{
 			UID:           true,
 			Flags:         true,
 			Envelope:      true,
 			RFC822Size:    true,
 			BodyStructure: &imap.FetchItemBodyStructure{Extended: true},
 			BodySection:   sendAtHeaderSection(),
-		}).Collect()
+		})
+		if err := c.endSelect(sel, folder); err != nil {
+			_, _ = fetchCmd.Collect()
+			return err
+		}
+		msgs, err := fetchCmd.Collect()
 		if err != nil {
 			return fmt.Errorf("FETCH headers: %w", err)
 		}
@@ -937,6 +999,7 @@ func (c *Client) FetchHeadersByUID(ctx context.Context, folder string, uids []ui
 			}
 			e.Size = uint32(m.RFC822Size)
 			e.HasAttachment = hasAttachment(m.BodyStructure)
+			e.BodyStructure = m.BodyStructure
 			emails = append(emails, e)
 		}
 		return nil
@@ -950,6 +1013,7 @@ func (c *Client) FetchBody(ctx context.Context, folder string, uid uint32) (stri
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "FetchBody %s uid=%d", folder, uid)
 	var markdown, rawHTML, webURL, references string
 	var attachments []Attachment
 	var spyPixels SpyPixelInfo
@@ -1085,6 +1149,7 @@ func (c *Client) MoveMessage(ctx context.Context, src string, uid uint32, dst st
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "MoveMessage %s uid=%d -> %s", src, uid, dst)
 	// destUID stays 0 unless the server reports the new UID (UIDPLUS COPYUID).
 	// Guessing "same UID" would let undo move an unrelated message that happens
 	// to carry that UID in the destination folder.
@@ -1123,7 +1188,10 @@ func (c *Client) MoveMessage(ctx context.Context, src string, uid uint32, dst st
 				}
 			}
 		}
-		c.selectedMailbox = ""
+		// The source mailbox stays selected after MOVE (RFC 9051 §6.4.8); the
+		// server's untagged EXPUNGE responses are consumed by go-imap and every
+		// later operation is UID-addressed, so no re-SELECT is needed. Clearing
+		// the cache here cost one extra round trip per MOVE.
 		audit("MOVE %s uid=%d -> %s destUID=%d", src, uid, dst, destUID)
 		return nil
 	})
@@ -1170,6 +1238,7 @@ func (c *Client) ExpungeAll(ctx context.Context, folder string, uids []uint32) e
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "ExpungeAll %s count=%d", folder, len(uids))
 	if len(uids) == 0 {
 		return nil
 	}
@@ -1204,6 +1273,7 @@ func (c *Client) MarkSeen(ctx context.Context, folder string, uid uint32) error 
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "MarkSeen %s uid=%d", folder, uid)
 	return c.withConn(ctx, func(conn *imapclient.Client) error {
 		if err := c.selectMailbox(folder); err != nil {
 			return err
@@ -1222,6 +1292,7 @@ func (c *Client) MarkUnseen(ctx context.Context, folder string, uid uint32) erro
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	defer trace(time.Now(), "MarkUnseen %s uid=%d", folder, uid)
 	return c.withConn(ctx, func(conn *imapclient.Client) error {
 		if err := c.selectMailbox(folder); err != nil {
 			return err

@@ -1397,6 +1397,8 @@ func TestInboxHKeyClosesOffTabView(t *testing.T) {
 func TestReloadKeepsCursorOnSameEmail(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Folders.Inbox = "INBOX"
+	noAutoScreen := false
+	cfg.UI.AutoScreenOnLoad = &noAutoScreen // reload of INBOX; no screener in this model
 	mk := func(uid uint32, h int) imap.Email {
 		return imap.Email{UID: uid, Folder: "INBOX", Subject: fmt.Sprintf("m%d", uid), From: "a@x", Date: time.Now().Add(-time.Duration(h) * time.Hour), Seen: true}
 	}
@@ -1409,14 +1411,14 @@ func TestReloadKeepsCursorOnSameEmail(t *testing.T) {
 	}
 
 	// A newer mail arrived: rows shift down by one.
-	res, _ := m.Update(emailsLoadedMsg{emails: []imap.Email{mk(4, 0), mk(3, 1), mk(2, 2), mk(1, 3)}, folder: "OTHER"})
+	res, _ := m.Update(emailsLoadedMsg{emails: []imap.Email{mk(4, 0), mk(3, 1), mk(2, 2), mk(1, 3)}, folder: "INBOX"})
 	mm := res.(Model)
 	if e := selectedEmail(mm.inbox); e == nil || e.UID != 2 {
 		t.Errorf("after reload with a new mail on top, cursor should still be on uid 2, got %+v (index %d)", e, mm.inbox.Index())
 	}
 
 	// The cursor email was deleted: fall back to the same index (the next row).
-	res, _ = mm.Update(emailsLoadedMsg{emails: []imap.Email{mk(4, 0), mk(3, 1), mk(1, 3)}, folder: "OTHER"})
+	res, _ = mm.Update(emailsLoadedMsg{emails: []imap.Email{mk(4, 0), mk(3, 1), mk(1, 3)}, folder: "INBOX"})
 	mm = res.(Model)
 	if mm.inbox.Index() != 2 {
 		t.Errorf("after the cursor email vanished, index should stay 2, got %d", mm.inbox.Index())

@@ -13,6 +13,7 @@ The screener classifies senders into four buckets using plain-text allowlists. U
 | `screened_out.txt`  | Blocked                  | ScreenedOut       |
 | `feed.txt`          | Newsletter / feed        | Feed              |
 | `papertrail.txt`    | Receipts / notifications | PaperTrail        |
+| `spam.txt`          | Spam                     | Spam              |
 | `notify.txt`        | Desktop notification     | (no move; only fires `notify-send` — see [Notifications](../notifications/)) |
 | _(not in any list)_ | Unknown                  | ToScreen          |
 
@@ -37,8 +38,8 @@ Domain entries work in every screener list (`screened_in`, `screened_out`, `feed
 
 By default neomd screens your inbox automatically so you never have to press `S`:
 
-- **On every inbox load** — when you open neomd or switch to Inbox (or press `R`), the screener classifies all loaded emails in-memory and silently moves them. Your inbox is always clean.
-- **Background sync** — while neomd is running, the inbox is re-fetched and re-screened every 5 minutes. New mail that arrived since you opened neomd is handled automatically.
+- **On every inbox load** — when you open neomd or switch to Inbox (or press `R`), the screener classifies all loaded emails in-memory. Rows disappear from the list immediately; the actual MOVEs run behind the list on the primary IMAP connection (watch for `↻` next to the tabs while they finish).
+- **Background sync** — while neomd is running, the inbox is re-fetched and re-screened every 5 minutes on a **second IMAP connection** — each account logs in twice while the TUI is open. That second connection also handles tab unread counts, spy-pixel scanning, and folder prefetch, so it matters for connection-limited providers (small self-hosted Dovecot setups in particular). An inbox load that lands while a background sync cycle is still in flight skips its own auto-screen pass for that load; the running sync screens the new mail once it finishes.
 
 Both behaviours are configurable in `[ui]`:
 
@@ -48,7 +49,9 @@ auto_screen_on_load = true   # set false to disable auto-screen on inbox load
 bg_sync_interval    = 5      # minutes between background syncs; 0 = disabled
 ```
 
-`S` / `:screen` still works as a manual dry-run with `y/n` confirmation if you want to preview moves first.
+Setting only `auto_screen_on_load = false` does not stop screening entirely — background sync keeps running on its own timer. Set `bg_sync_interval = 0` as well to disable auto-screening completely.
+
+`S` and `:screen` only run on the plain Inbox tab — on any other tab, or inside a Search/Thread/Everything/Sender view, they're refused with a status message, since a classification MOVE always sources from the folder a row actually lives in. Both still work as a manual dry-run with `y/n` confirmation if you want to preview moves first.
 
 ## Day-to-day: screen new arrivals
 

@@ -35,6 +35,11 @@ func init() {
 			aliases: []string{"s"},
 			desc:    "screen currently loaded emails only (up to inbox_count)",
 			run: func(m *Model) (tea.Model, tea.Cmd) {
+				if !m.onPlainInboxTab() {
+					m.status = screenInboxOnlyStatus
+					m.isError = true
+					return m, nil
+				}
 				if err := m.validateScreenerSafety(); err != nil {
 					m.status = err.Error()
 					m.isError = true
@@ -79,6 +84,7 @@ func init() {
 			desc:    "reload / refresh the current folder",
 			run: func(m *Model) (tea.Model, tea.Cmd) {
 				m.loading = true
+				m.refreshing = false
 				return m, m.fetchFolderCmd(m.activeFolder())
 			},
 		},
@@ -173,7 +179,9 @@ func init() {
 			desc:    "open Spam folder (not in tab rotation — use :go-spam to visit)",
 			run: func(m *Model) (tea.Model, tea.Cmd) {
 				m.loading = true
+				m.offTabFolder = "Spam" // as gS: the load guard only applies the active folder's result
 				m.status = "Spam folder — press R to reload, tab to leave"
+				m.refreshing = false
 				return m, tea.Batch(m.spinner.Tick, m.fetchFolderCmd(m.cfg.Folders.Spam))
 			},
 		},

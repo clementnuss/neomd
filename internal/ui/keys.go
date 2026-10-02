@@ -12,7 +12,7 @@ type HelpSection struct {
 var HelpSections = []HelpSection{
 	{"Navigation", [][2]string{
 		{"j / k", "move down / up"},
-		{"d / u", "page down / up in inbox/help"},
+		{"d / u", "page down / up in inbox/help (ctrl+d also pages down)"},
 		{"gg", "jump to top"},
 		{"G", "jump to bottom"},
 		{"enter / l", "open email"},
@@ -139,6 +139,9 @@ var HelpSections = []HelpSection{
 		{":mark-read  / :mr", "mark all emails in current folder as read"},
 		{":reload  / :r", "reload current folder"},
 		{":check  / :ch", "show screener classification for selected email"},
+		{":thread  / :t", "show full conversation for the selected email (across folders)"},
+		{":scan-spy-pixels  / :ssp", "scan current folder for tracking pixels (background, skips already scanned)"},
+		{":recover  / :rec", "reopen the most recent compose backup from ~/.cache/neomd/drafts/"},
 		{":everything  / :ev", "show latest 50 emails across all folders"},
 		{":merge <title>  / :mg", "merge marked/cursor emails into a titled group (HEY-style); collapses to one ≡ row"},
 		{":merge-sender <title>  / :mgs", "like :merge, plus future mail from the cursor email's sender joins automatically"},

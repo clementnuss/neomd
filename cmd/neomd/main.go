@@ -53,6 +53,9 @@ func main() {
 		os.Exit(1)
 	}
 	goIMAP.SetAuditLogPath(config.AuditLogPath()) // every MOVE/EXPUNGE → ~/.cache/neomd/moves.log
+	if os.Getenv("NEOMD_IMAP_TRACE") == "1" {
+		goIMAP.SetTracePath(config.IMAPTracePath()) // per-operation timings → ~/.cache/neomd/imap-trace.log
+	}
 
 	accounts := cfg.ActiveAccounts()
 	if len(accounts) == 0 {
@@ -118,6 +121,22 @@ func main() {
 	}
 	defer func() {
 		for _, c := range imapClients {
+			if c != nil {
+				c.Close()
+			}
+		}
+	}()
+
+	// Second connection per account for background housekeeping (tab counts,
+	// 5-minute sync, spy scan, prefetch) so it never queues behind a user action.
+	bgClients := make([]*goIMAP.Client, len(imapClients))
+	for i, c := range imapClients {
+		if c != nil {
+			bgClients[i] = goIMAP.New(c.ConfigCopy())
+		}
+	}
+	defer func() {
+		for _, c := range bgClients {
 			if c != nil {
 				c.Close()
 			}
@@ -227,7 +246,7 @@ func main() {
 		if mailtoURI != "" {
 			mailto = parseMailto(mailtoURI)
 		}
-		model := ui.New(cfg, imapClients, sc, mailto)
+		model := ui.New(cfg, imapClients, sc, mailto).WithBackgroundClients(bgClients)
 
 		p := tea.NewProgram(
 			model,

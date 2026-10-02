@@ -10,7 +10,7 @@ Emails are rendered as styled Markdown in the terminal using [glamour](https://g
 | Key | Action |
 |-----|--------|
 | `j` / `k` | scroll line by line |
-| `space` / `d` | page down / up |
+| `d` / `u` (or `ctrl+d`/`ctrl+u`, `f`/`b`) | page down / up |
 | `gg` | jump to top of email |
 | `G` | jump to bottom of email |
 | `h` / `q` / `esc` | back to inbox |
@@ -28,7 +28,7 @@ Emails are rendered as styled Markdown in the terminal using [glamour](https://g
 
 Remote images appear as `[Image: alt]` placeholders, keeping the reading experience clean and fast. To see images, press `O` to open in your browser.
 
-**Inline / attached images** (e.g. screenshots pasted into an email) are listed in the reader header: `Attach:  [1] screenshot.png  [2] report.pdf`. Press `1`–`9` to download to `~/Downloads/` and open with `xdg-open`. Inline images also show `[Image: filename.png]` placeholders at their position in the body text.
+**Inline / attached images** (e.g. screenshots pasted into an email) are listed in the reader header: `Attach:  [1] screenshot.png  [2] report.pdf`. Press `1`–`9` to download to `~/Downloads/` and open with `xdg-open`. Inline images also show `[Image: filename.png]` placeholders at their position in the body text. On mail ≥ 1 MB, an inline image over 256 KB stays on the server until downloaded this way — see [Attachments](#attachments) below.
 
 When you press `O` to open in the browser, inline images are extracted from the email and saved to temp files. The HTML `cid:` references are rewritten to `file://` paths so the browser renders them — including images sent by other people (not just your own).
 
@@ -63,9 +63,9 @@ Links in emails are automatically numbered inline where they appear in the body.
 
 Press `space` then a digit (`1`–`9`, `0` for 10th) to open the link in `$BROWSER`.
 
-- Up to 10 links per email, deduplicated by URL
+- Up to 99 links per email, deduplicated by URL — `1`–`9`/`0` open the first ten; `space` then `l` then two digits (`l11`–`l99`) opens the rest
 - Numbers appear inline so you can see them while reading without scrolling
-- If an email has no links, `space` works as page-down as usual
+- `space` is always the reader's leader key (see [Navigation](#navigation)) — it never pages the body; use `d`/`u` for that
 
 ## Attachments
 
@@ -76,6 +76,8 @@ Attach:  [1] report.pdf  [2] photo.png
 ```
 
 Press `1`–`9` to download attachment N to `~/Downloads/` and open it with `xdg-open`. Filenames are deduplicated automatically if a file already exists.
+
+On mail ≥ 1 MB total, attachments over 256 KB stay on the server until you ask for them — the header still lists them with their size, and pressing `1`–`9` (or the `<space> v` calendar chord for a large invite) shows `Downloading <name> (<size>)…` while it fetches, then opens as usual. The size shown is the encoded transfer size (roughly 1.37× the actual file for base64-encoded attachments). Smaller mail, and parts that were fetched with the body, behave exactly as before. `E` (continue draft) on a large draft or queued send-later message downloads any missing parts first, before opening the editor.
 
 ## Download Raw Email Source
 
@@ -243,7 +245,7 @@ Neomd marks emails as read **after you've spent time viewing them**, not immedia
 
 **How it works:**
 
-- When you open an email (press `enter` or `l`), neomd fetches the full body from IMAP
+- When you open an email (press `enter` or `l`), neomd fetches the body from IMAP — for mail under 1 MB that's the full message; for larger `multipart/mixed` mail it fetches only the text parts and small (≤ 256 KB) siblings, leaving big attachments on the server until you download them (see [Attachments](#attachments))
 - Once the body loads, a **timer starts** (default: 7 seconds)
 - If you stay in the reader for the full duration, the email is marked as `\Seen` on the server
 - If you exit early (press `h`, `q`, `esc`, or `T`), the email **stays unread**

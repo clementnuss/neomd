@@ -9,7 +9,9 @@
 package integration_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -1189,4 +1191,158 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// TestIntegration_PipelinedFetchMatchesSearch pins that the pipelined
+// SELECT‖UID SEARCH path in FetchHeaders returns exactly the newest-n UID set
+// a serial SearchUIDs + FetchHeadersByUID sees on a real server.
+func TestIntegration_PipelinedFetchMatchesSearch(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	ctx := context.Background()
+	fast, err := cli.FetchHeaders(ctx, "INBOX", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uids, err := cli.SearchUIDs(ctx, "INBOX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) > 50 {
+		uids = uids[len(uids)-50:]
+	}
+	slow, err := cli.FetchHeadersByUID(ctx, "INBOX", uids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fast) != len(slow) {
+		t.Fatalf("pipelined %d emails, serial %d", len(fast), len(slow))
+	}
+	for i := range fast { // fast is newest-first, slow ascending
+		if fast[i].UID != slow[len(slow)-1-i].UID || fast[i].Subject != slow[len(slow)-1-i].Subject {
+			t.Errorf("row %d differs: %d/%q vs %d/%q", i, fast[i].UID, fast[i].Subject, slow[len(slow)-1-i].UID, slow[len(slow)-1-i].Subject)
+		}
+	}
+	counts, err := cli.FetchUnseenCounts(ctx, map[string]string{"Inbox": "INBOX", "PaperTrail": "PaperTrail", "Waiting": "Waiting", "Scheduled": "Scheduled"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unseen := 0
+	for _, e := range slow {
+		if !e.Seen {
+			unseen++
+		}
+	}
+	if len(uids) <= 50 && counts["Inbox"] != unseen {
+		t.Errorf("STATUS unseen %d != counted %d", counts["Inbox"], unseen)
+	}
+}
+
+// TestIntegration_MoveWithoutReselect pins that a MOVE followed by a header
+// fetch on the same connection reflects the move on both sides without any
+// forced re-SELECT (MoveMessage no longer clears the selection cache).
+func TestIntegration_MoveWithoutReselect(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	testFolder := "NeomdTest"
+	if _, err := cli.EnsureFolders(context.Background(), []string{testFolder}); err != nil {
+		t.Fatalf("EnsureFolders: %v", err)
+	}
+	subject := uniqueSubject("move-noreselect")
+	if err := smtp.Send(env.smtpConfig(), env.user, "", "", subject, "moved without re-select", nil); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	email := waitForEmail(t, cli, "INBOX", subject, 30*time.Second)
+	destUID, err := cli.MoveMessage(context.Background(), "INBOX", email.UID, testFolder)
+	if err != nil {
+		cleanupEmail(t, cli, "INBOX", email.UID)
+		t.Fatalf("MoveMessage: %v", err)
+	}
+	src, err := cli.FetchHeaders(context.Background(), "INBOX", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range src {
+		if e.UID == email.UID {
+			t.Errorf("uid %d still listed in INBOX after MOVE", email.UID)
+		}
+	}
+	moved := waitForEmail(t, cli, testFolder, subject, 10*time.Second)
+	if destUID != 0 && moved.UID != destUID {
+		t.Errorf("dest UID %d != COPYUID %d", moved.UID, destUID)
+	}
+	cleanupEmail(t, cli, testFolder, moved.UID)
+}
+
+// TestIntegration_LazyBodyOnRealServer pins the lazy body fetch against a real
+// IMAP server: a >1 MB multipart/mixed message is appended, FetchBodyOf must
+// return the same text as the full fetch, the big attachment as metadata only
+// (server-side part sections BODY[n.MIME]/BODY[n]), and FetchPart the exact
+// original bytes.
+func TestIntegration_LazyBodyOnRealServer(t *testing.T) {
+	env := loadEnv(t)
+	cli := env.imapClient()
+	defer cli.Close()
+	ctx := context.Background()
+	testFolder := "NeomdTest"
+	if _, err := cli.EnsureFolders(ctx, []string{testFolder}); err != nil {
+		t.Fatalf("EnsureFolders: %v", err)
+	}
+	subject := uniqueSubject("lazy-body")
+	pdf := make([]byte, 1200*1024)
+	for i := range pdf {
+		pdf[i] = byte(i*7 + i/251)
+	}
+	var b strings.Builder
+	b.WriteString("From: " + env.from + "\r\nTo: " + env.user + "\r\nSubject: " + subject + "\r\n")
+	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\nMessage-ID: <" + subject + "@neomd.test>\r\nMIME-Version: 1.0\r\n")
+	b.WriteString("Content-Type: multipart/mixed; boundary=\"B\"\r\n\r\n")
+	b.WriteString("--B\r\nContent-Type: multipart/alternative; boundary=\"A\"\r\n\r\n")
+	b.WriteString("--A\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nLazy body text, see https://example.com/lazy\r\n")
+	b.WriteString("--A\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Lazy <b>body</b> text, see <a href=\"https://example.com/lazy\">lazy</a></p>\r\n")
+	b.WriteString("--A--\r\n")
+	b.WriteString("--B\r\nContent-Type: application/pdf; name=\"big.pdf\"\r\nContent-Disposition: attachment; filename=\"big.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\n")
+	enc := base64.StdEncoding.EncodeToString(pdf)
+	for i := 0; i < len(enc); i += 76 {
+		j := i + 76
+		if j > len(enc) {
+			j = len(enc)
+		}
+		b.WriteString(enc[i:j] + "\r\n")
+	}
+	b.WriteString("--B--\r\n")
+	if err := cli.SaveSent(ctx, testFolder, []byte(b.String())); err != nil {
+		t.Fatalf("APPEND: %v", err)
+	}
+	e := waitForEmail(t, cli, testFolder, subject, 20*time.Second)
+	defer cleanupEmail(t, cli, testFolder, e.UID)
+	if e.BodyStructure == nil {
+		t.Fatal("FetchHeaders must carry the BODYSTRUCTURE")
+	}
+	fullMD, fullHTML, _, fullAtt, _, _, err := cli.FetchBody(ctx, testFolder, e.UID)
+	if err != nil {
+		t.Fatalf("FetchBody: %v", err)
+	}
+	lazyMD, lazyHTML, _, lazyAtt, _, _, err := cli.FetchBodyOf(ctx, testFolder, e.UID, e.Size, e.BodyStructure)
+	if err != nil {
+		t.Fatalf("FetchBodyOf: %v", err)
+	}
+	if lazyMD != fullMD || lazyHTML != fullHTML {
+		t.Errorf("lazy text differs from full fetch:\nlazy=%q\nfull=%q", lazyMD, fullMD)
+	}
+	if len(lazyAtt) != 1 || len(fullAtt) != 1 {
+		t.Fatalf("attachments: lazy=%d full=%d", len(lazyAtt), len(fullAtt))
+	}
+	if lazyAtt[0].Data != nil || len(lazyAtt[0].Part) == 0 || lazyAtt[0].Filename != "big.pdf" || lazyAtt[0].Size == 0 {
+		t.Errorf("lazy attachment must be metadata only: %+v", lazyAtt[0])
+	}
+	data, err := cli.FetchPart(ctx, testFolder, e.UID, lazyAtt[0].Part)
+	if err != nil {
+		t.Fatalf("FetchPart: %v", err)
+	}
+	if !bytes.Equal(data, pdf) || !bytes.Equal(data, fullAtt[0].Data) {
+		t.Errorf("FetchPart bytes differ from the original (%d vs %d)", len(data), len(pdf))
+	}
 }
