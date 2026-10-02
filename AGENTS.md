@@ -112,7 +112,10 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   `\Answered` flag (`MarkAnswered` in `internal/imap/client.go`, called from `sendEmailCmd`
   in `internal/ui/model.go`) and the inbox shows `·` (or `·╰` inside a thread,
   `internal/ui/inbox.go`). The local flag also updates immediately on `sendDoneMsg` without
-  a refetch. Tests: `TestSendDoneMsgUpdatesAnsweredFlag`, `TestReplyIndicatorWithThread`.
+  a refetch — in `m.emails` and the folder's cache snapshot (`setAnsweredLocal`), so a
+  cache-hit switch, optimistic removal or `n` rebuild keeps the dot. Tests:
+  `TestSendDoneMsgUpdatesAnsweredFlag`, `TestReplyIndicatorWithThread`,
+  `TestReplyDotSurvivesListRebuild`.
 - **Reply tracking survives pre-send round-trips** — `pendingIsReply` is *session-scoped*:
   re-edit (`e`), spell check (`s`), AI handoff (`i`), and CC/BCC edit (`ctrl+b`) from
   pre-send must all preserve `replyToUID`/`replyToFolder` and the `In-Reply-To`/`References`
@@ -344,9 +347,20 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 - **Reclassification is atomic** — classifying removes the address from ALL conflicting
   lists (snapshot/rollback on failure, both files and moved emails). Test:
   `TestCrossListCleanup_Reclassification`.
-- **Empty lists pause screening** — TUI and headless daemon both skip auto-screening until
-  the first sender is classified (prevents sweeping a fresh inbox to ToScreen). Test:
-  `TestScreenInbox_EmptyScreenerLists`.
+- **Empty lists pause screening** — TUI (Inbox load AND the 5-minute background sync) and
+  headless daemon all skip auto-screening until the first sender is classified (prevents
+  sweeping a fresh inbox to ToScreen); `auto_screen_on_load = false` also stops the
+  background sync's screening. Tests: `TestScreenInbox_EmptyScreenerLists`,
+  `TestBgSync_SkipsScreeningWhenListsEmptyOrDisabled`.
+- **`:screen` / `S` run on the plain Inbox tab only; every auto-screen MOVE uses the
+  email's own folder as source** — both refuse on any other tab and inside a
+  Search/Thread/Everything view ("screen runs on the Inbox tab only"), and
+  `autoScreenPlan` captures `screenMove{uid, src: e.Folder, dst}` so a plan can never
+  address another folder's UIDs. A failed auto-screen MOVE reloads once without
+  auto-screening (`skipAutoScreenOnce`), so a persistent NO cannot loop
+  reload→screen→fail; the next load retries. Tests:
+  `TestScreenCommand_RefusedOutsideInboxTab`, `TestAutoScreenPlan_UsesEmailFolderAsSource`,
+  `TestAutoScreen_ErrorDoesNotLoop`.
 - **Screener destinations may never be Trash** — refuses to run otherwise. Test:
   `TestValidateScreenerSafetyRejectsTrashDestination`.
 - **ToScreen sender-level classify** — acting on one unmarked message applies to all
@@ -371,7 +385,7 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   the original subject is never mutated (reply/forward/thread logic uses the real RFC
   subject). Tests: `TestRowFitsTerminalWidth`, `TestDisplaySafe`.
 - **Indicator columns** — unread, `·` replied, `°` spy pixel, `│`/`╰` thread connectors.
-- **Undo (`u`)** — reverses the last move/delete using UIDPLUS destination UIDs captured
+- **Undo (`U`)** — reverses the last move/delete using UIDPLUS destination UIDs captured
   on move; batch operations preserve partial-undo info on failure. Integration test:
   `TestIntegration_IMAPMoveAndUndo`.
 
@@ -388,15 +402,23 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   MOVE runs; `removeFromList` rebuilds the list so the cursor lands on the same
   folder+UID as before the removal, or on the next row when that email itself was
   removed — exactly as a normal reload does. `batchDoneMsg`/`autoScreenDoneMsg` pick
-  the redraw path with `optimistic := !m.loading`: success ends in a background
-  refresh (`refreshActiveFolderCmd`, header `↻`), any error ends in `loading = true` +
-  full reload with the error in the status line and partial undo kept. `u` undo, `X`,
-  delete-all and `:screen` always take the non-optimistic spinner-reload
-  path. Server calls, order and audit lines are unchanged. On error the source folders'
-  snapshots are dropped (they were trimmed optimistically), and a synthetic view (Search,
-  Thread, …) is left via `leaveSyntheticView` so the tab-folder reload is applied.
-  Tests: `TestOptimistic_*`, `TestOptimistic_ErrorDropsOriginFolderCache`,
-  `TestOptimistic_ErrorInSearchViewReloadsTabFolder`.
+  the redraw path with `optimistic := len(msg.removed) > 0 || !m.loading` (a tagged
+  message is optimistic even while a body fetch owns the spinner, and then leaves that
+  spinner alone): success ends in a background refresh (`refreshActiveFolderCmd`, header
+  `↻`), any error ends in `loading = true` + full reload with the error in the status
+  line and partial undo kept. The optimistic completion never clears marks (they were
+  cleared at keypress; marks made since are the user's next selection). `U` refuses
+  while an optimistic move is in flight (`pendingBatches`, "Move still in progress") —
+  the running move's undo entry is only pushed on completion. `I O F P $` keep rows that
+  are already in the key's target folder (no MOVE runs for them; the list file is still
+  written). `U` undo, `X`, delete-all and `:screen` always take the non-optimistic
+  spinner-reload path. Server calls, order and audit lines are unchanged. On error the
+  source folders' snapshots are dropped (they were trimmed optimistically), and a
+  synthetic view (Search, Thread, …) is left via `leaveSyntheticView` so the tab-folder
+  reload is applied. Tests: `TestOptimistic_*`, `TestOptimistic_ErrorDropsOriginFolderCache`,
+  `TestOptimistic_ErrorInSearchViewReloadsTabFolder`,
+  `TestOptimistic_MarksMadeDuringMoveSurviveCompletion`,
+  `TestOptimistic_UndoWaitsForInFlightMove`, `TestOptimistic_ScreenInInboxKeepsRow`.
 - **`n` flips `\Seen` locally first; a fetch landing mid-STORE keeps the flipped state**
   — the `n` handler sets the flag in the list and the cached snapshot (`setSeenLocal`),
   records the wanted state in `pendingSeen` (account+folder+UID) and runs the STOREs
@@ -416,10 +438,17 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   command that ends in one of those two messages, or its rows stay hidden. Tests:
   `TestOptimistic_LateRefreshDoesNotResurfaceRemovedRow`,
   `TestOptimistic_ErrorReleasesPendingRemoval`.
-- **A background refresh keeps marks and the `/` filter** — when `emailsLoadedMsg` lands
-  while `refreshing` (list visible, no spinner), marks survive for UIDs still in the
-  result and the filter text stays; a spinner reload clears both as before. Test:
-  `TestCache_BackgroundRefreshKeepsMarksAndFilter`.
+- **A background refresh keeps marks and the `/` filter** — `emailsLoadedMsg` treats a
+  result as a `↻` refresh when `refreshing` is set (whatever `loading` says): marks
+  survive for UIDs still in the result, the filter text stays, and `loading` is not
+  touched (a body fetch, `T`, `V` … may own the spinner). Every spinner folder load (`R`,
+  `:reload`, cache-miss switch, undo/error reloads, `gS`/`gd`/`:go-spam`) sets
+  `refreshing = false` together with `loading = true`, so the two can never be
+  confused; a spinner reload clears marks and filter as before. The bg sync caches the
+  Inbox without the rows it is about to screen. Tests:
+  `TestCache_BackgroundRefreshKeepsMarksAndFilter`,
+  `TestCache_RefreshLandingDuringBodyFetchKeepsMarksAndSpinner`,
+  `TestCache_BgInboxSnapshotExcludesScreenedRows`.
 - **A cached list is only shown with `↻` and a fetch in flight** — `loadActiveFolder`
   serves `folderCache[account+folder]` on tab switches (`[ui].instant_folder_switch`,
   default true); `emailsLoadedMsg` always caches and applies to the visible list only
@@ -448,16 +477,28 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 
 ## Reading & Security
 
-- **Large mail fetches text first; `Attachment.Data` may be nil** — `FetchBodyOf`
-  (`internal/imap/lazybody.go`) fetches only the body root plus small siblings for a
-  `multipart/mixed` message ≥ 1 MB and returns big attachments as metadata (`Data == nil`,
-  `Part` set, `Size` from BODYSTRUCTURE). Every consumer of `Attachment.Data` must go
-  through `attachmentOnServer` → `fetchAttachmentCmd` → `attachmentFetchedMsg` (reader
-  `1`–`9`, `<space> v` chord) or tolerate nil (inline images, calendar card). `FetchBody`,
-  `.eml` download, headers view, draft reopen and the daemon keep the full raw fetch.
-  `FetchHeaders` keeps the BODYSTRUCTURE on `imap.Email` so the lazy path costs no extra
-  round trip. Tests: `TestLazy_*`, `TestMem_FetchBodyOf_*`,
-  `TestIntegration_LazyBodyOnRealServer`, `TestLazyAttachment_*`.
+- **Large mail fetches text first; `Attachment.Data` may be nil** — for a
+  `multipart/mixed` message ≥ 1 MB, `FetchBodyOf` (`internal/imap/lazybody.go`) keeps
+  every top-level child except the big ones: the body root and every child whose subtree
+  is ≤ 256 KB come in one FETCH and are reassembled into a synthetic multipart/mixed
+  (`reassembleKept`), so `parseBody` sees the original structure minus the dropped
+  parts (plain+HTML siblings, inline `cid:` images, calendar parts, attachment names and
+  spy pixels behave exactly as on the full fetch). Children > 256 KB are returned as
+  metadata (`Data == nil`, `Part` set, `Size` = subtree size); nothing to drop, or a
+  server that does not echo a requested section, means the full fetch. Every consumer of
+  `Attachment.Data` must go through `attachmentOnServer` → `fetchAttachmentCmd` →
+  `attachmentFetchedMsg` (reader `1`–`9`, `<space> v` chord, `E` draft reopen) or
+  tolerate nil (inline images, calendar card). The download result carries folder+UID and
+  is dropped unless that email is still open — never applied by index to another mail.
+  `E` (continueDraft) downloads every server-side part first (`then: "draft"` loops until
+  all are present); `writeAttachmentsTemp` refuses an attachment that was never
+  downloaded instead of writing a 0-byte file. `FetchBody`, `.eml` download, headers view
+  and the daemon keep the full raw fetch. `FetchHeaders` keeps the BODYSTRUCTURE on
+  `imap.Email` so the lazy path costs no extra round trip. Tests: `TestLazy_*`,
+  `TestMem_FetchBodyOf_*` (incl. `_PlainAndHTMLSiblings`, `_InlineCIDSibling`,
+  `_CalendarFirstChild`), `TestIntegration_LazyBodyOnRealServer`, `TestLazyAttachment_*`
+  (incl. `_StaleDownloadForOtherEmailIgnored`, `_ContinueDraftDownloadsFirst`),
+  `TestWriteAttachmentsTemp_RefusesServerSideAttachment`.
 - **Spy pixels blocked** — two layers: curated denylist with attribution
   (`internal/imap/tracker_list.go`) + generic 1×1 heuristic; glamour never fetches remote
   resources; results cached in `~/.cache/neomd/spy_pixels` (`+key` spy / `-key` clean).

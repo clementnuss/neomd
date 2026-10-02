@@ -72,7 +72,8 @@ const keyringSentinel = "keyring"
 // keyring. After config.Load() resolves the keyring entry, Password holds
 // the actual password and this method returns false. The sentinel only
 // remains if keyring lookup failed (no entry yet, or service unavailable),
-// in which case downstream code can prompt the user via :set-password.
+// in which case the login fails until the entry is stored (service "neomd",
+// key "account/<name>/password").
 func (a AccountConfig) UseKeyring() bool {
 	return a.Password == keyringSentinel
 }
@@ -864,7 +865,7 @@ func resolveKeyringPassword(accountName, password string) string {
 		return resolved
 	}
 	if err == keyring.ErrNotFound {
-		fmt.Fprintf(os.Stderr, "neomd: account %q: keyring entry not set — run :set-password %s\n", accountName, accountName)
+		fmt.Fprintf(os.Stderr, "neomd: account %q: keyring entry not set — store the password in the OS keyring under service \"neomd\", key \"account/%s/password\" (docs: Configuration → Storing passwords in the OS keyring)\n", accountName, accountName)
 	} else {
 		fmt.Fprintf(os.Stderr, "neomd: account %q: keyring unavailable: %v\n", accountName, err)
 	}
