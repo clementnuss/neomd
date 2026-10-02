@@ -1481,6 +1481,25 @@ func (m *Model) setSeenLocal(folder string, uid uint32, seen bool) {
 	}
 }
 
+// setAnsweredLocal sets \Answered on folder+uid in m.emails and in that
+// folder's cache snapshot (a local mirror of the server STORE). An empty
+// folder matches by UID only.
+func (m *Model) setAnsweredLocal(folder string, uid uint32) {
+	match := func(e imap.Email) bool { return e.UID == uid && (folder == "" || e.Folder == folder) }
+	for i := range m.emails {
+		if match(m.emails[i]) {
+			m.emails[i].Answered = true
+		}
+	}
+	if snap, ok := m.folderCache[cacheKey(m.activeAccountName(), folder)]; ok {
+		for i := range snap.emails {
+			if match(snap.emails[i]) {
+				snap.emails[i].Answered = true
+			}
+		}
+	}
+}
+
 // moveEmailCmd moves a single email to dst without updating screener lists.
 func (m Model) moveEmailCmd(e *imap.Email, dst string) tea.Cmd {
 	src := e.Folder
@@ -2982,17 +3001,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.isError = false
 			m.state = stateInbox
 		}
-		// Update local Answered flag so the reply indicator shows immediately.
+		// Update local Answered flag so the reply indicator shows immediately
+		// and survives local list rebuilds (cache-hit switch, optimistic
+		// removal, n) until the next fetch carries the server flag.
 		if msg.replyToUID > 0 {
-			items := m.inbox.Items()
-			for i, it := range items {
-				if ei, ok := it.(emailItem); ok && ei.email.UID == msg.replyToUID {
-					ei.email.Answered = true
-					items[i] = ei
-					break
-				}
-			}
-			m.inbox.SetItems(items)
+			m.setAnsweredLocal(msg.replyToFolder, msg.replyToUID)
+			return m, tea.Batch(m.applyFilter(), requeueCleanup)
 		}
 		return m, requeueCleanup
 

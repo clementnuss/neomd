@@ -291,3 +291,38 @@ func TestInboxHeaderMarkHintNamesCtrlU(t *testing.T) {
 		t.Errorf("mark hint must say ctrl+u, got header:\n%s", v)
 	}
 }
+
+// D1: the · reply dot set on sendDoneMsg must survive any local list
+// rebuild (applyFilter, optimistic removal, cache-hit tab switch).
+func TestReplyDotSurvivesListRebuild(t *testing.T) {
+	m := instantModel(t, 3)
+	m.folderCache = map[string]folderSnapshot{cacheKey("P", "INBOX"): {emails: append([]imap.Email(nil), m.emails...)}}
+	res, _ := m.Update(sendDoneMsg{replyToUID: 2, replyToFolder: "INBOX"})
+	mm := res.(Model)
+	answered := func(mm Model) bool {
+		for _, it := range mm.inbox.Items() {
+			if e := it.(emailItem).email; e.UID == 2 {
+				return e.Answered
+			}
+		}
+		return false
+	}
+	if !answered(mm) {
+		t.Fatal("dot must show right after send")
+	}
+	mm.applyFilter()
+	if !answered(mm) {
+		t.Error("dot lost on list rebuild (m.emails not updated)")
+	}
+	for _, e := range mm.folderCache[cacheKey("P", "INBOX")].emails {
+		if e.UID == 2 && !e.Answered {
+			t.Error("dot lost in the folder cache snapshot")
+		}
+	}
+	// Tab away and back: the cache-hit list keeps the dot.
+	res, _ = mm.updateInbox(keyTab())
+	res, _ = res.(Model).updateInbox(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if !answered(res.(Model)) {
+		t.Error("dot lost on a cache-hit tab switch")
+	}
+}
