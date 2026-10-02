@@ -29,6 +29,16 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # RELEASE_NOTES.md ("## What has changed?") becomes the top of the
+      # release body; goreleaser appends its grouped changelog below it.
+      - name: Load release notes
+        run: |
+          {
+            echo 'RELEASE_NOTES<<NEOMD_EOF'
+            cat RELEASE_NOTES.md
+            echo 'NEOMD_EOF'
+          } >> "$GITHUB_ENV"
+
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: latest
