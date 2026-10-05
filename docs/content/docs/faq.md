@@ -84,7 +84,7 @@ Typical after the first big screening of a legacy inbox, after approving a sende
 
 1. Update neomd (rebuild from `main` or install the next release) and press `R` on the Inbox. The window is now the newest mail by arrival date; the moved-in old mail sorts where it belongs and `j`/`d`/`ctrl+d` on the last row load older pages.
 2. On an older version, set `inbox_count = 0` under `[ui]` in `config.toml` (fetch all) or a value above the folder's size, restart, press `R`. Then screen the old mail out of the Inbox with `:screen-all`, `O`/`F`/`P` or `e` (archive) until it is below `inbox_count` again, and restore the limit.
-3. Prevent a loop while the lists settle: approve senders (`I`) one by one rather than bulk-moving everything back with `:reset-toscreen`, which gives every moved mail a new high UID again.
+3. Still on an older version while the lists settle: approve senders (`I`) one by one rather than bulk-moving everything back with `:reset-toscreen`, which gives every moved mail a new high UID again and refills the old UID-based window. On a current version this does not matter — moved mail keeps its arrival date, so `:reset-toscreen`, bulk `I` and undo are safe.
 
 Nothing is lost in any case: the mail is in the folder (check the webmail or `~/.cache/neomd/moves.log`, which records every MOVE with its destination UID); only the loaded window was wrong.
 
