@@ -288,7 +288,7 @@ For the full configuration reference including multiple accounts, OAuth2 authent
 
 On first launch, **auto-screening is paused** because your screener lists are empty — neomd won't move anything until you've classified your first sender. Your Inbox loads normally so you can explore.
 
-By default, neomd loads and auto-screens only the newest `200` Inbox emails (`[ui].inbox_count`). This keeps startup predictable. If you want to re-screen the entire Inbox on the IMAP server, run `:screen-all` inside neomd; that scans every Inbox email, not just the loaded subset, and can take a while on large mailboxes.
+By default, neomd loads and auto-screens only the newest `200` emails of a folder by arrival date (`[ui].inbox_count`). This keeps startup predictable; in a folder with more mail (Archive, Feed, …), moving onto the last row with `j`, `d` or `ctrl+d` loads the next `200` older emails. If you want to re-screen the entire Inbox on the IMAP server, run `:screen-all` inside neomd; that scans every Inbox email, not just the loaded subset, and can take a while on large mailboxes.
 
 **Getting started with the screener:**
 

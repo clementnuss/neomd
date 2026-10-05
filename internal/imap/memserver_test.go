@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"sort"
 	"strconv"
 	"testing"
 	"time"
@@ -279,5 +280,127 @@ func TestMem_FailedSelectClearsCachedSelection(t *testing.T) {
 	}
 	if cli.selectedMailbox != "" {
 		t.Errorf("selectedMailbox = %q after failed SELECT, want empty", cli.selectedMailbox)
+	}
+}
+
+// seedMessageAt appends one message with an explicit INTERNALDATE. The Date
+// header matches so envelope-date sorting agrees with the internal date.
+func seedMessageAt(t *testing.T, user *imapmemserver.User, mailbox, subject string, at time.Time) {
+	t.Helper()
+	raw := []byte("From: Sender <s@example.com>\r\nTo: u@example.com\r\nSubject: " + subject +
+		"\r\nMessage-ID: <" + subject + "@example.com>\r\nDate: " + at.UTC().Format(time.RFC1123Z) + "\r\n\r\nbody\r\n")
+	opts := &goimap.AppendOptions{Time: at}
+	if _, err := user.Append(mailbox, memLiteral{bytes.NewReader(raw), int64(len(raw))}, opts); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// seedMovedInOldMail reproduces issue #34: three recent mails arrive in INBOX
+// (UIDs 1–3), then three old mails queued in ToScreen are MOVEd back into
+// INBOX by a bulk approve and receive fresh, higher UIDs (4–6) although
+// their INTERNALDATE is months older. The highest UIDs are the oldest mail.
+func seedMovedInOldMail(t *testing.T, cli *Client, user *imapmemserver.User) {
+	t.Helper()
+	recent := time.Date(2026, 10, 1, 10, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		seedMessageAt(t, user, "INBOX", "new"+strconv.Itoa(i), recent.Add(time.Duration(i)*time.Hour))
+	}
+	old := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	for i := 1; i <= 3; i++ {
+		seedMessageAt(t, user, "ToScreen", "old"+strconv.Itoa(i), old.Add(time.Duration(i)*time.Hour))
+	}
+	for uid := uint32(1); uid <= 3; uid++ {
+		destUID, err := cli.MoveMessage(context.Background(), "ToScreen", uid, "INBOX")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if destUID != uid+3 {
+			t.Fatalf("moved old%d landed at INBOX uid %d, want %d", uid, destUID, uid+3)
+		}
+	}
+}
+
+func TestMem_FetchHeaders_WindowIsNewestByInternalDateNotUID(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMovedInOldMail(t, cli, user)
+	got, err := cli.FetchHeaders(context.Background(), "INBOX", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Newest first by arrival date: new3, new2, new1 — not the moved-in old mail.
+	want := []uint32{3, 2, 1}
+	if fmt.Sprint(uidsOf(got)) != fmt.Sprint(want) {
+		t.Errorf("uids = %v, want %v (window must be selected by INTERNALDATE, not UID)", uidsOf(got), want)
+	}
+}
+
+func TestMem_FetchHeaders_FolderWithinLimitUnchanged(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMovedInOldMail(t, cli, user)
+	got, err := cli.FetchHeaders(context.Background(), "INBOX", 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// No window needed: every message, UID-descending as before (the UI sorts).
+	want := []uint32{6, 5, 4, 3, 2, 1}
+	if fmt.Sprint(uidsOf(got)) != fmt.Sprint(want) {
+		t.Errorf("uids = %v, want %v", uidsOf(got), want)
+	}
+}
+
+func TestMem_FetchLatest_WindowIsNewestByInternalDateNotUID(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMovedInOldMail(t, cli, user)
+	got, err := cli.FetchLatest(context.Background(), "INBOX", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []uint32{3, 2, 1}
+	if fmt.Sprint(uidsOf(got)) != fmt.Sprint(want) {
+		t.Errorf("uids = %v, want %v", uidsOf(got), want)
+	}
+}
+
+func TestMem_SearchFolder_CapIsNewestByInternalDateNotUID(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMovedInOldMail(t, cli, user)
+	old := searchFolderCap
+	searchFolderCap = 3
+	t.Cleanup(func() { searchFolderCap = old })
+	got, err := cli.searchFolder(context.Background(), "INBOX", &goimap.SearchCriteria{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// FetchHeadersByUID returns server order; the search view sorts by date.
+	uids := uidsOf(got)
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	want := []uint32{1, 2, 3}
+	if fmt.Sprint(uids) != fmt.Sprint(want) {
+		t.Errorf("uids = %v, want %v (cap must keep the most recently received, not highest UIDs)", uids, want)
+	}
+}
+
+func TestMem_FetchMoreHeaders_SkipsLoadedAndPicksNewestRemaining(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMovedInOldMail(t, cli, user)
+	// The list already holds the first window (new1–new3); the next page is
+	// the two most recently received of the rest: old3 (uid 6), old2 (uid 5).
+	loaded := map[uint32]bool{1: true, 2: true, 3: true}
+	got, err := cli.FetchMoreHeaders(context.Background(), "INBOX", 2, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []uint32{6, 5}
+	if fmt.Sprint(uidsOf(got)) != fmt.Sprint(want) {
+		t.Errorf("uids = %v, want %v", uidsOf(got), want)
+	}
+	// Everything loaded → nothing more, no error.
+	for _, e := range got {
+		loaded[e.UID] = true
+	}
+	loaded[4] = true
+	rest, err := cli.FetchMoreHeaders(context.Background(), "INBOX", 2, loaded)
+	if err != nil || len(rest) != 0 {
+		t.Errorf("after all loaded: %v, %v; want empty", uidsOf(rest), err)
 	}
 }

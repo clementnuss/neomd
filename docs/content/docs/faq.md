@@ -74,6 +74,20 @@ Drafts and Spam are **off-tab folders** (not in the regular tab rotation) and be
 
 **Old bug (fixed 2026-04-10)**: In older versions, pressing `R` while viewing Drafts could show Inbox content. If you experience this, rebuild neomd to get the fix.
 
+## My Inbox shows old emails and the most recent ones are missing
+
+Typical after the first big screening of a legacy inbox, after approving a sender with many queued mails (`I` on ToScreen), after `:reset-toscreen` or an undo. The webmail shows the new mail, neomd shows months-old mail on top and `,m` does not help.
+
+**Cause (fixed 2026-10-05, in every release after v0.10.0):** neomd loads only the `inbox_count` most recent messages of a folder (200 by default), and older versions picked that window by the highest IMAP UIDs. Every mail that is *moved into* a folder receives a fresh, highest UID there, so mail moved back into the Inbox filled the window and the really recent mail fell below the cutoff — it was never fetched, so no sort order could show it. Only folders with more than `inbox_count` messages are affected. Current versions select the window by arrival date (`INTERNALDATE`), and `j`/`d` on the last row loads the next page.
+
+**How to get out of it:**
+
+1. Update neomd (rebuild from `main` or install the next release) and press `R` on the Inbox. The window is now the newest mail by arrival date; the moved-in old mail sorts where it belongs and `j`/`d`/`ctrl+d` on the last row load older pages.
+2. On an older version, set `inbox_count = 0` under `[ui]` in `config.toml` (fetch all) or a value above the folder's size, restart, press `R`. Then screen the old mail out of the Inbox with `:screen-all`, `O`/`F`/`P` or `e` (archive) until it is below `inbox_count` again, and restore the limit.
+3. Still on an older version while the lists settle: approve senders (`I`) one by one rather than bulk-moving everything back with `:reset-toscreen`, which gives every moved mail a new high UID again and refills the old UID-based window. On a current version this does not matter — moved mail keeps its arrival date, so `:reset-toscreen`, bulk `I` and undo are safe.
+
+Nothing is lost in any case: the mail is in the folder (check the webmail or `~/.cache/neomd/moves.log`, which records every MOVE with its destination UID); only the loaded window was wrong.
+
 ## Why do Bengali / Arabic / Thai / emoji subjects show as `·` in the inbox?
 
 Complex scripts (Bengali, Devanagari, Arabic, Hebrew, Thai, emoji, …) render at unpredictable widths in modern terminals. The terminal emulator (foot, kitty, alacritty, …) and the application disagree on how many cells a grapheme cluster takes — this is a well-known problem documented in [lipgloss #562](https://github.com/charmbracelet/lipgloss/issues/562) and [Mitchell Hashimoto's "Grapheme Clusters and Terminal Emulators"](https://mitchellh.com/writing/grapheme-clusters-in-terminals). The real fix is the [OSC 66 text-sizing protocol](https://sw.kovidgoyal.net/kitty/text-sizing-protocol/), but it's only implemented in kitty and foot, and tmux strips it.

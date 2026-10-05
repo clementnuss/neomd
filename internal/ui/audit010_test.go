@@ -282,13 +282,13 @@ func TestCache_BgInboxSnapshotExcludesScreenedRows(t *testing.T) {
 	}
 }
 
-// B7: the header hint names the key that clears marks (ctrl+u; U is undo).
-func TestInboxHeaderMarkHintNamesCtrlU(t *testing.T) {
+// B7: the header hint names the key that clears marks (esc; U is undo, ctrl+u pages up).
+func TestInboxHeaderMarkHintNamesEsc(t *testing.T) {
 	m := instantModel(t, 2)
 	m.markedUIDs[1] = true
 	v := m.viewInbox()
-	if !strings.Contains(v, "ctrl+u to clear") || strings.Contains(v, "U to clear]") {
-		t.Errorf("mark hint must say ctrl+u, got header:\n%s", v)
+	if !strings.Contains(v, "esc to clear") || strings.Contains(v, "U to clear]") {
+		t.Errorf("mark hint must say esc, got header:\n%s", v)
 	}
 }
 
