@@ -559,7 +559,8 @@ that conversation; "the test was too strict" is not a decision an agent makes al
   UIDs)`; the result appends only unknown UIDs, re-sorts, keeps the cursor
   (`reselectEmail`), extends the folder cache, and `windowFor` makes every later
   `fetchFolderCmd`/bg Inbox fetch request the extended size so `R`/↻ keep the list. A
-  short page (or an initial load below `inbox_count`) sets `folderComplete`; `G`,
+  short page (or an initial load below `inbox_count`) sets `folderComplete`, which also
+  hides the hint bar's leading "↓ more below" cue (`inboxHintBar`, `moreBelow`); `G`,
   synthetic views and `inbox_count = 0` never page; a stale result for another folder
   is dropped but clears `loadingMore`. Tests: `TestLoadMore_*`.
 - **`safeGo` everywhere** — background goroutines must use `safeGo()` (panic → 

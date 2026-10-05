@@ -2,6 +2,7 @@ package ui
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -189,4 +190,25 @@ func uidsOfEmails(es []imap.Email) []uint32 {
 		out[i] = e.UID
 	}
 	return out
+}
+
+func TestLoadMore_HintBarStartsWithMoreBelowUntilFolderComplete(t *testing.T) {
+	m := loadMoreModel(t) // 3 rows loaded, window 3, completeness unknown → may have more
+	got := m.inboxHintBar()
+	cue, open := strings.Index(got, "more below"), strings.Index(got, "enter/l open")
+	if cue < 0 || open < 0 || cue > open || !strings.Contains(got, "3 loaded") {
+		t.Errorf("hint = %q; want the 'more below' cue before 'enter/l open' (the line is clipped at the terminal edge) and '3 loaded'", got)
+	}
+	m.folderComplete = map[string]bool{cacheKey("", "Archive"): true}
+	if got := m.inboxHintBar(); strings.Contains(got, "more below") || !strings.Contains(got, "3 loaded") {
+		t.Errorf("hint = %q; a complete folder shows the plain bar and count", got)
+	}
+}
+
+func TestLoadMore_HintBarNoCueWhenInboxCountUnlimited(t *testing.T) {
+	m := loadMoreModel(t)
+	m.cfg.UI.InboxCount = 0
+	if got := m.inboxHintBar(); strings.Contains(got, "more below") {
+		t.Errorf("hint = %q; inbox_count 0 loads everything, no cue", got)
+	}
 }

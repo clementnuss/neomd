@@ -222,11 +222,14 @@ func readerHelp(isDraft bool, hasLinks bool) string {
 }
 
 // inboxHelp returns the one-line help string for the inbox view.
-func inboxHelp(folder string) string {
+// moreBelow prepends the load-more cue (see Model.moreBelow).
+func inboxHelp(folder string, moreBelow bool) string {
 	base := []string{"enter/l open", "d/u page", "r reply", "ctrl+r reply-all", "ctrl+e react", "f fwd", "c compose", "I/O/F/P/A screen", "g goto", "M move", ", sort", "/ filter", "R reload", ": cmds", "space more", "? help", "q quit"}
-	_ = folder
 	if folder == "ToScreen" {
 		base = []string{"I approve", "O block", "F feed", "P papertrail", "q back"}
+	}
+	if moreBelow {
+		base = append([]string{"↓ more below (j/d at last row)"}, base...)
 	}
 	return styleHelp.Render("  " + strings.Join(base, " · "))
 }

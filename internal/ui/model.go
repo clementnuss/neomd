@@ -7260,16 +7260,35 @@ func (m Model) viewInbox() string {
 	} else if m.status != "" {
 		b.WriteString(statusBar(m.status, m.isError))
 	} else {
-		help := inboxHelp(m.folders[m.activeFolderI])
-		if len(m.accounts) > 1 {
-			help += styleHelp.Render(" · ctrl+a switch account")
-		}
-		if len(m.emails) > 0 {
-			help += styleDate.Render(fmt.Sprintf("  │  %d loaded", len(m.emails)))
-		}
-		b.WriteString(help)
+		b.WriteString(m.inboxHintBar())
 	}
 	return b.String()
+}
+
+// inboxHintBar is the bottom help line of the inbox view. It starts with a
+// "↓ more below" cue while the folder may hold more than the loaded rows
+// (load-more on j/d at the last row) — at the front because the terminal
+// clips the line, so a tail cue would never be seen — and ends with the
+// account switch hint and "│ N loaded".
+func (m Model) inboxHintBar() string {
+	help := inboxHelp(m.folders[m.activeFolderI], m.moreBelow())
+	if len(m.accounts) > 1 {
+		help += styleHelp.Render(" · ctrl+a switch account")
+	}
+	if len(m.emails) > 0 {
+		help += styleDate.Render(fmt.Sprintf("  │  %d loaded", len(m.emails)))
+	}
+	return help
+}
+
+// moreBelow reports whether the visible folder may hold more messages than
+// the loaded rows: inbox_count > 0, a tab folder, and no load (initial or
+// load-more) has yet returned fewer rows than requested (folderComplete).
+func (m Model) moreBelow() bool {
+	if len(m.emails) == 0 || m.cfg == nil || m.cfg.UI.InboxCount <= 0 || m.inSyntheticView() {
+		return false
+	}
+	return !m.folderComplete[cacheKey(m.activeAccountName(), m.activeFolder())]
 }
 
 func (m Model) viewReader() string {
