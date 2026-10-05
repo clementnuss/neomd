@@ -1,5 +1,9 @@
 # Changelog
 
+# 2026-10-03
+
+- **`make status` on the headless server now says whether screening actually works** — the old target only checked that the process existed, which is how a DNS outage on the server (Tailscale rewrote `resolv.conf`, no global nameserver configured) went unnoticed for 25 days while every one-minute cycle failed with `lookup imap.mail.hostpoint.ch ... server misbehaving` and no mail was screened. `status` (`scripts/headless-server/Makefile`) now prints the last three log lines and a verdict from the most recent cycle result: `OK: last screening cycle succeeded`, or `ERROR: last screening cycle FAILED:` with the error text and `failing since: <timestamp of the first error after the last success>`, exiting 1. It also exits 1 when the daemon is not running or the log file is missing (renamed/deleted under a running daemon). `make sync-headless` runs it after deploy instead of its own `ps` + `tail -20`. Verified on the FreeBSD server with BSD make against the live log, a synthetic failing log and an empty log; no Go code changed.
+
 # 2026-10-02
 
 - **0.10 audit fixes** — a pre-release audit of the instant-IMAP work found these; each is fixed with a pinning test.

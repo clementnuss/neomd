@@ -187,11 +187,9 @@ sync-headless: build
 	ssh $(TI_HOST) ". ~/.profile; mkdir -p ~/.local/share/neomd; make run-headless"
 	@echo "Waiting for daemon to start..."
 	@sleep 2
-	@echo "Checking status..."
-	@ssh $(TI_HOST) "ps aux | grep '[n]eomd' || echo 'ERROR: neomd is not running'"
-	@echo ""
-	@echo "Checking logs for errors..."
-	@ssh $(TI_HOST) "tail -20 ~/.local/share/neomd/daemon.log"
+	@echo "Checking status (first screening cycle must finish before the verdict is meaningful)..."
+	@sleep 8
+	@ssh $(TI_HOST) "make status"
 
 ## syncthing-tunnel: start syncthing on ti (if not running) and open SSH tunnel → http://localhost:8385
 syncthing-tunnel:
