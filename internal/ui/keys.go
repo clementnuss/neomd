@@ -12,12 +12,13 @@ type HelpSection struct {
 var HelpSections = []HelpSection{
 	{"Navigation", [][2]string{
 		{"j / k", "move down / up"},
-		{"d / u", "page down / up in inbox/help (ctrl+d also pages down)"},
+		{"d / u", "page down / up in inbox/help (ctrl+d / ctrl+u also page, vim-style)"},
+		{"j / d  (last row)", "load the next inbox_count older emails of the folder (status: Loading more…)"},
 		{"gg", "jump to top"},
 		{"G", "jump to bottom"},
 		{"enter / l", "open email"},
 		{"h / q / esc", "back to inbox (from reader)"},
-		{"h / esc  (inbox)", "back one level — close a temporary view (Search / Thread / Sender / Merged) or clear the / filter and z unread-only"},
+		{"h / esc  (inbox)", "back one level — clear marks, close a temporary view (Search / Thread / Sender / Merged) or clear the / filter and z unread-only"},
 		{"?", "toggle help overlay (type to filter)"},
 	}},
 	{"Folders", [][2]string{
@@ -68,7 +69,7 @@ var HelpSections = []HelpSection{
 	}},
 	{"Multi-select & Undo", [][2]string{
 		{"m", "mark / unmark email (or every member of a ≡ merged row) + advance cursor"},
-		{"ctrl+u", "clear all marks"},
+		{"esc", "clear all marks"},
 		{"U", "undo last move or delete (reverses x, A, M* — not screener actions)"},
 		{"X  (Trash only)", "permanently delete marked or cursor email(s) — no undo"},
 	}},

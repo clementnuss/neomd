@@ -388,6 +388,13 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 - **Undo (`U`)** — reverses the last move/delete using UIDPLUS destination UIDs captured
   on move; batch operations preserve partial-undo info on failure. Integration test:
   `TestIntegration_IMAPMoveAndUndo`.
+- **`ctrl+d`/`ctrl+u` page the inbox like `d`/`u`; `esc` clears marks** — the vim
+  half-page keys are pure cursor moves and never touch marks. "Clear all marks" is the
+  first step of the `esc`/`h` back-one-level cascade in `updateInbox` (marks → temporary
+  view → filter/unread-only); the header hint says `esc to clear`. `ctrl+m` is not
+  bindable (terminal carriage return = `enter`). Tests: `TestInbox_CtrlDPagesDownLikeD`,
+  `TestInbox_CtrlUPagesUpLikeU`, `TestInbox_EscClearsMarks`,
+  `TestInboxHeaderMarkHintNamesEsc`.
 
 - **Search matches contact names** — `internal/contacts` harvests `Name <addr>` pairs
   from loaded headers into `~/.cache/neomd/contacts`; the local `/` filter appends

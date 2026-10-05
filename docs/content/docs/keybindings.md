@@ -17,7 +17,8 @@ To update both the help overlay and this document at once, edit that file and ru
 | Key | Action |
 |-----|--------|
 | `j / k` | move down / up |
-| `d / u` | page down / up in inbox/help (ctrl+d also pages down) |
+| `d / u` | page down / up in inbox/help (ctrl+d / ctrl+u also page; ctrl+u clears marks first if any) |
+| `j / d  (last row)` | load the next inbox_count older emails of the folder (status: Loading more…) |
 | `gg` | jump to top |
 | `G` | jump to bottom |
 | `enter / l` | open email |
@@ -89,7 +90,7 @@ To update both the help overlay and this document at once, edit that file and ru
 | Key | Action |
 |-----|--------|
 | `m` | mark / unmark email (or every member of a ≡ merged row) + advance cursor |
-| `ctrl+u` | clear all marks |
+| `ctrl+u` | clear all marks (pages up when nothing is marked) |
 | `U` | undo last move or delete (reverses x, A, M* — not screener actions) |
 | `X  (Trash only)` | permanently delete marked or cursor email(s) — no undo |
 
