@@ -1,5 +1,23 @@
 # Changelog
 
+# 2026-10-05
+
+- **The folder window is the newest mail by arrival date, not the highest UIDs (#34)** — `FetchHeaders` picked its `inbox_count` window as the highest `n` UIDs. IMAP MOVE/COPY give a message a fresh, highest UID in the destination mailbox (RFC 9051 per-mailbox UIDs), so every mail bulk-moved *into* a folder — `I` approve on ToScreen, `:reset-toscreen`, `U` undo — landed above all real recent mail, filled the window, and pushed the recent mail below the cutoff where no display sort (`,m`) could bring it back. Only folders with more than `inbox_count` messages were affected, which is why a HEY-style Inbox of a dozen rows never showed it while a 12'000-mail legacy Inbox after its first screening did (reproduced on Hostpoint/Dovecot, so not an Infomaniak quirk; the demo's `moves.log` shows `ToScreen uid=273 → INBOX destUID=1397`). `FetchHeaders`, `FetchLatest` (`:everything`) and the per-folder search cap (`searchFolderCap`, was a literal 100) now narrow the window with one cheap `UID FETCH (UID INTERNALDATE)` and keep the `n` most recently received (`newestUIDsByInternalDate`, `internal/imap/client.go`); INTERNALDATE survives MOVE/COPY on every server tested, and the SORT extension is not used because Infomaniak does not offer it. Folders at or below `inbox_count`, and `inbox_count = 0`, take the old single-round-trip path unchanged, so a daily Inbox sees no new traffic. Verified on the live Hostpoint demo: a 10-row window returned April mail before, October mail after. Tests: `TestMem_FetchHeaders_WindowIsNewestByInternalDateNotUID`, `TestMem_FetchHeaders_FolderWithinLimitUnchanged`, `TestMem_FetchLatest_WindowIsNewestByInternalDateNotUID`, `TestMem_SearchFolder_CapIsNewestByInternalDateNotUID`.
+- **Load more: `j`, `d` or `ctrl+d` on the last row fetches the next `inbox_count` older emails** — Archive, Feed and other folders with more than `inbox_count` messages ended at the window; the only way further back was a bigger `inbox_count` in the config. Moving onto the last row with `j`/`down`/`d`/`ctrl+d` now shows "Loading more…" and appends the next page (`FetchMoreHeaders`: the newest-by-arrival messages whose UIDs are not listed yet, so a mail arriving between pages is neither duplicated nor skipped), re-sorts, keeps the cursor on its row and reports "Loaded N more · M emails" or "All M emails loaded". The extended list survives `R`, ↻ and tab switches for the session (`windowFor`, `folderWindow`), a folder that returned fewer rows than requested is marked complete and never re-fetched at the bottom (`folderComplete`), `G` only jumps, synthetic views (Search, Everything, Thread) never page, and `inbox_count = 0` (fetch all) is untouched. Tests: `TestMem_FetchMoreHeaders_SkipsLoadedAndPicksNewestRemaining`, `TestLoadMore_*` (`internal/ui/load_more_test.go`).
+
+# 2026-10-05
+
+- **`ctrl+u` pages up in the inbox list; `esc` clears marks** — `ctrl+d` got its vim
+  half-page alias on 09-30 but `ctrl+u` was still "clear all marks", so the matching
+  page-up habit did nothing useful. `ctrl+u` is now an alias for `u` in `updateInbox`
+  (`internal/ui/model.go`, shared `inboxPageUp`); `u` is unchanged. "Clear all marks"
+  moved to `esc`, as the first step of its existing back-one-level cascade (marks →
+  temporary view → filter/unread-only); the header hint reads `[N marked · esc to
+  clear]`. `ctrl+m` was considered as the pair to `m` but terminals send it as a
+  carriage return, which bubbletea reports as `enter`. Tests:
+  `TestInbox_CtrlUPagesUpLikeU`, `TestInbox_EscClearsMarks`,
+  `TestInboxHeaderMarkHintNamesEsc`.
+
 # 2026-10-03
 
 - **`make status` on the headless server now says whether screening actually works** — the old target only checked that the process existed, which is how a DNS outage on the server (Tailscale rewrote `resolv.conf`, no global nameserver configured) went unnoticed for 25 days while every one-minute cycle failed with `lookup imap.mail.hostpoint.ch ... server misbehaving` and no mail was screened. `status` (`scripts/headless-server/Makefile`) now prints the last three log lines and a verdict from the most recent cycle result: `OK: last screening cycle succeeded`, or `ERROR: last screening cycle FAILED:` with the error text and `failing since: <timestamp of the first error after the last success>`, exiting 1. It also exits 1 when the daemon is not running or the log file is missing (renamed/deleted under a running daemon). `make sync-headless` runs it after deploy instead of its own `ps` + `tail -20`. Verified on the FreeBSD server with BSD make against the live log, a synthetic failing log and an empty log; no Go code changed.

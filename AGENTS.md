@@ -545,6 +545,23 @@ that conversation; "the test was too strict" is not a decision an agent makes al
 - **Retry policy** — `withConnRetry` (one retry) only for read-only ops (FETCH/SEARCH/
   STATUS); mutating ops (MOVE/APPEND/STORE) use `withConn`, never retried (duplicate-mail
   risk). NOOP health probe after 2+ min idle handles suspend/resume.
+- **The fetch window is selected by INTERNALDATE, never by highest UID** — MOVE/COPY
+  give a message a fresh, highest UID in the destination mailbox, so "last n UIDs" is
+  "last n moved-in", not "newest n" (issue #34: bulk approve pushed recent Inbox mail
+  below the cutoff). `FetchHeaders`, `FetchLatest`, `FetchMoreHeaders` and the
+  `searchFolderCap` all narrow through `newestUIDsByInternalDate` (one `UID FETCH (UID
+  INTERNALDATE)`); folders within the window and `inbox_count = 0` skip that round trip.
+  Never use the SORT extension as the only path (Infomaniak lacks it). Tests:
+  `TestMem_FetchHeaders_WindowIsNewestByInternalDateNotUID`, `TestMem_FetchLatest_*`,
+  `TestMem_SearchFolder_CapIsNewestByInternalDateNotUID`, `TestMem_FetchMoreHeaders_*`.
+- **Load more never duplicates, drops or collapses rows** — `j`/`down`/`d`/`ctrl+d` on
+  the last row of a tab folder runs `loadMoreIfAtBottom` → `FetchMoreHeaders(n, loaded
+  UIDs)`; the result appends only unknown UIDs, re-sorts, keeps the cursor
+  (`reselectEmail`), extends the folder cache, and `windowFor` makes every later
+  `fetchFolderCmd`/bg Inbox fetch request the extended size so `R`/↻ keep the list. A
+  short page (or an initial load below `inbox_count`) sets `folderComplete`; `G`,
+  synthetic views and `inbox_count = 0` never page; a stale result for another folder
+  is dropped but clears `loadingMore`. Tests: `TestLoadMore_*`.
 - **`safeGo` everywhere** — background goroutines must use `safeGo()` (panic → 
   `~/.cache/neomd/crash.log`), never bare `go func()`. Maps passed to goroutines are
   snapshotted on the main goroutine first (spy-pixel cache race, CHANGELOG 2026-05-08).

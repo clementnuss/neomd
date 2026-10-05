@@ -404,10 +404,27 @@ func parseSendAtSection(sections []imapclient.FetchBodySectionBuffer) time.Time 
 }
 
 func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Email, error) {
+	defer trace(time.Now(), "FetchHeaders %s n=%d", folder, n)
+	return c.fetchHeadersWindow(ctx, folder, n, nil)
+}
+
+// FetchMoreHeaders is the "load more" page: the n most recently received
+// messages of folder whose UIDs are not in loaded, newest first. Empty when
+// every message is loaded. n must be > 0.
+func (c *Client) FetchMoreHeaders(ctx context.Context, folder string, n int, loaded map[uint32]bool) ([]Email, error) {
+	defer trace(time.Now(), "FetchMoreHeaders %s n=%d loaded=%d", folder, n, len(loaded))
+	if n <= 0 {
+		return nil, nil
+	}
+	return c.fetchHeadersWindow(ctx, folder, n, loaded)
+}
+
+// fetchHeadersWindow fetches headers of the n most recently received messages
+// of folder (all when n == 0), skipping UIDs in exclude, newest first.
+func (c *Client) fetchHeadersWindow(ctx context.Context, folder string, n int, exclude map[uint32]bool) ([]Email, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	defer trace(time.Now(), "FetchHeaders %s n=%d", folder, n)
 	var emails []Email
 	err := c.withConnRetry(ctx, func(conn *imapclient.Client) error {
 		emails = nil // reset on retry to avoid duplicates
@@ -427,6 +444,15 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 			return nil
 		}
 		allUIDs, _ := uidSet.Nums()
+		if len(exclude) > 0 {
+			kept := allUIDs[:0]
+			for _, u := range allUIDs {
+				if !exclude[uint32(u)] {
+					kept = append(kept, u)
+				}
+			}
+			allUIDs = kept
+		}
 		if len(allUIDs) == 0 {
 			return nil
 		}

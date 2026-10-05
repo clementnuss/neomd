@@ -144,6 +144,14 @@ type (
 		account string
 		err     error
 	}
+	// moreEmailsLoadedMsg is loadMoreCmd's result: the next page of older
+	// emails of folder (nil when everything is loaded), or the fetch error.
+	moreEmailsLoadedMsg struct {
+		folder  string
+		account string
+		emails  []imap.Email
+		err     error
+	}
 	// background sync (runs every bgSyncInterval while neomd is open)
 	bgSyncTickMsg     struct{}
 	bgInboxFetchedMsg struct {
@@ -635,6 +643,11 @@ type Model struct {
 	height     int
 	loading    bool
 	refreshing bool // background re-fetch of the visible folder in flight (header shows ↻)
+	// Load more: j/d/ctrl+d on the last row fetches the next inbox_count
+	// older emails of the folder (FetchMoreHeaders) and appends them.
+	loadingMore    bool            // a load-more page fetch is in flight (status "Loading more…")
+	folderWindow   map[string]int  // account+folder → rows loaded via load-more; refreshes keep that window
+	folderComplete map[string]bool // account+folder → the server holds no more than the loaded rows
 
 	// Bulk operation progress — shared pointer, written by goroutines, read by view.
 	bulkProgress *bulkOp
@@ -1150,13 +1163,63 @@ func (m Model) fetchFolderMsgFor(folder string) emailsLoadedMsg {
 
 func (m Model) fetchFolderCmd(folder string) tea.Cmd {
 	res := m.fetchFolderMsgFor(folder)
+	n := m.windowFor(folder)
 	return func() tea.Msg {
-		emails, err := m.imapCli().FetchHeaders(nil, folder, m.cfg.UI.InboxCount)
+		emails, err := m.imapCli().FetchHeaders(nil, folder, n)
 		if err != nil {
 			return folderErrMsg{folder: res.folder, account: res.account, err: err}
 		}
 		res.emails = emails
 		return res
+	}
+}
+
+// windowFor is the number of headers to fetch for folder: inbox_count, or
+// more once load-more extended that folder's list, so a refresh (R, ↻, tab
+// switch) does not collapse it back. 0 keeps inbox_count = 0 (fetch all).
+func (m Model) windowFor(folder string) int {
+	if m.cfg == nil || m.cfg.UI.InboxCount <= 0 {
+		return 0
+	}
+	n := m.cfg.UI.InboxCount
+	if w := m.folderWindow[cacheKey(m.activeAccountName(), folder)]; w > n {
+		return w
+	}
+	return n
+}
+
+// loadMoreIfAtBottom starts a load-more fetch when the cursor sits on the
+// last row of a tab folder that may hold more than the loaded rows. Returns
+// nil when nothing is to do (middle of the list, fetch in flight, folder
+// complete, synthetic view, inbox_count = 0).
+func (m *Model) loadMoreIfAtBottom() tea.Cmd {
+	if m.cfg == nil || m.cfg.UI.InboxCount <= 0 || m.loadingMore || m.loading || m.inSyntheticView() {
+		return nil
+	}
+	if len(m.inbox.Items()) == 0 || m.inbox.Index() != len(m.inbox.Items())-1 {
+		return nil
+	}
+	folder := m.activeFolder()
+	if m.folderComplete[cacheKey(m.activeAccountName(), folder)] {
+		return nil
+	}
+	m.loadingMore = true
+	m.status = "Loading more…"
+	m.isError = false
+	return m.loadMoreCmd(folder, m.cfg.UI.InboxCount)
+}
+
+// loadMoreCmd fetches the next n most recently received emails of folder
+// that are not in the list yet (loaded UIDs captured by value now).
+func (m Model) loadMoreCmd(folder string, n int) tea.Cmd {
+	loaded := make(map[uint32]bool, len(m.emails))
+	for _, e := range m.emails {
+		loaded[e.UID] = true
+	}
+	account := m.activeAccountName()
+	return func() tea.Msg {
+		emails, err := m.imapCli().FetchMoreHeaders(nil, folder, n, loaded)
+		return moreEmailsLoadedMsg{folder: folder, account: account, emails: emails, err: err}
 	}
 }
 
@@ -1684,6 +1747,16 @@ func (m Model) inboxPageStep() int {
 		return 10
 	}
 	return m.height - 6
+}
+
+// inboxPageUp moves the inbox cursor up one page (u / ctrl+u).
+func (m Model) inboxPageUp() (tea.Model, tea.Cmd) {
+	prev := m.inbox.Index() - m.inboxPageStep()
+	if prev < 0 {
+		prev = 0
+	}
+	m.inbox.Select(prev)
+	return m, nil
 }
 
 func (m Model) hasComposeDraft() bool {
@@ -2467,9 +2540,10 @@ func (m Model) scheduleMarkAsReadTimer(uid uint32, folder string) tea.Cmd {
 // Errors are swallowed — a transient network hiccup shouldn't disrupt the UI.
 func (m Model) bgFetchInboxCmd() tea.Cmd {
 	account := m.activeAccountName()
+	n := m.windowFor(m.cfg.Folders.Inbox)
 	return func() tea.Msg {
 		m.bgImapCli().ResetMailboxSelection() // force fresh SELECT to see new messages
-		emails, err := m.bgImapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, m.cfg.UI.InboxCount)
+		emails, err := m.bgImapCli().FetchHeaders(nil, m.cfg.Folders.Inbox, n)
 		if err != nil {
 			// Return nil to let the next scheduled tick retry naturally.
 			// Returning bgSyncTickMsg{} here creates an infinite loop on persistent errors!
@@ -2719,6 +2793,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case emailsLoadedMsg:
+		// Fewer rows than requested: the server has nothing beyond this list,
+		// so j/d at the bottom never fires a load-more fetch for it.
+		if w := m.windowFor(msg.folder); w > 0 {
+			if m.folderComplete == nil {
+				m.folderComplete = make(map[string]bool)
+			}
+			m.folderComplete[cacheKey(msg.account, msg.folder)] = len(msg.emails) < w
+		}
 		// Consumed only by an applied Inbox load (set by the error reload
 		// after a failed auto-screen MOVE); a stray result for another folder
 		// or a cached-only result must not use it up.
@@ -3592,6 +3674,61 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.isError = true
 		return m, nil
 
+	case moreEmailsLoadedMsg:
+		// Only the visible folder of the active account appends; a stale
+		// page for another folder is dropped (its list may be reloaded by
+		// now) but still ends the in-flight state so load-more stays usable.
+		m.loadingMore = false
+		if msg.folder != m.activeFolder() || (msg.account != "" && msg.account != m.activeAccountName()) {
+			return m, nil
+		}
+		if msg.err != nil {
+			m.status = msg.err.Error()
+			m.isError = true
+			return m, nil
+		}
+		key := cacheKey(msg.account, msg.folder)
+		have := make(map[uint32]bool, len(m.emails))
+		for _, e := range m.emails {
+			have[e.UID] = true
+		}
+		fresh := m.withPendingSeen(msg.account, m.withoutPending(msg.account, msg.emails))
+		added := 0
+		for _, e := range fresh {
+			if have[e.UID] {
+				continue // arrived between the two fetches, already listed
+			}
+			have[e.UID] = true
+			m.emails = append(m.emails, e)
+			added++
+		}
+		if m.folderWindow == nil {
+			m.folderWindow = make(map[string]int)
+		}
+		if m.folderComplete == nil {
+			m.folderComplete = make(map[string]bool)
+		}
+		m.folderWindow[key] = len(m.emails)
+		if len(msg.emails) < m.cfg.UI.InboxCount {
+			m.folderComplete[key] = true
+		}
+		if m.folderCache == nil {
+			m.folderCache = make(map[string]folderSnapshot)
+		}
+		m.folderCache[key] = folderSnapshot{emails: append([]imap.Email(nil), m.emails...), fetchedAt: time.Now()}
+		m.harvestContacts(fresh)
+		m.applySenderRules(fresh)
+		prevCursor := selectedEmail(m.inbox)
+		sortCmd := m.sortEmails()
+		m.reselectEmail(prevCursor)
+		if m.folderComplete[key] {
+			m.status = fmt.Sprintf("All %d emails loaded", len(m.emails))
+		} else {
+			m.status = fmt.Sprintf("Loaded %d more · %d emails", added, len(m.emails))
+		}
+		m.isError = false
+		return m, sortCmd
+
 	case folderErrMsg:
 		// A failure for another folder/account is stale: the visible folder's
 		// own fetch owns the spinner/↻.
@@ -3926,6 +4063,10 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 
 	case "esc", "h": // h = "back" like in the reader; falls through to the list (page up) when nothing is open
+		if len(m.markedUIDs) > 0 { // clear all marks (was ctrl+u, now vim page-up)
+			m.markedUIDs = make(map[uint32]bool)
+			return m, m.applyFilter()
+		}
 		if m.filterText != "" || m.showUnreadOnly {
 			m.filterActive = false
 			m.filterText = ""
@@ -4004,10 +4145,6 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.loading = true
 		return m, tea.Batch(m.spinner.Tick, m.deleteAllExecCmd(m.cfg.Folders.Trash, uids))
-
-	case "ctrl+u": // clear all marks
-		m.markedUIDs = make(map[uint32]bool)
-		return m, m.applyFilter()
 
 	case "U": // undo last move/delete
 		if m.pendingBatches > 0 {
@@ -4260,15 +4397,10 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if next >= 0 {
 			m.inbox.Select(next)
 		}
-		return m, nil
+		return m, m.loadMoreIfAtBottom()
 
-	case "u":
-		prev := m.inbox.Index() - m.inboxPageStep()
-		if prev < 0 {
-			prev = 0
-		}
-		m.inbox.Select(prev)
-		return m, nil
+	case "u", "ctrl+u": // ctrl+u: vim half-page habit, mirrors ctrl+d
+		return m.inboxPageUp()
 
 	case "/":
 		m.filterActive = true
@@ -4436,6 +4568,11 @@ func (m Model) updateInbox(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Forward remaining keys (j/k navigation, filter /) to list
 	var cmd tea.Cmd
 	m.inbox, cmd = m.inbox.Update(msg)
+	if key == "j" || key == "down" {
+		if more := m.loadMoreIfAtBottom(); more != nil {
+			return m, tea.Batch(cmd, more)
+		}
+	}
 	return m, cmd
 }
 
@@ -7087,7 +7224,7 @@ func (m Model) viewInbox() string {
 		header = acct + "  " + header
 	}
 	if len(m.markedUIDs) > 0 {
-		header += styleDate.Render(fmt.Sprintf("  [%d marked · ctrl+u to clear]", len(m.markedUIDs)))
+		header += styleDate.Render(fmt.Sprintf("  [%d marked · esc to clear]", len(m.markedUIDs)))
 	}
 	if m.refreshing {
 		header += styleDate.Render(" ↻")

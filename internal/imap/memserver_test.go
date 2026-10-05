@@ -379,3 +379,28 @@ func TestMem_SearchFolder_CapIsNewestByInternalDateNotUID(t *testing.T) {
 		t.Errorf("uids = %v, want %v (cap must keep the most recently received, not highest UIDs)", uids, want)
 	}
 }
+
+func TestMem_FetchMoreHeaders_SkipsLoadedAndPicksNewestRemaining(t *testing.T) {
+	cli, user := startMemIMAP(t)
+	seedMovedInOldMail(t, cli, user)
+	// The list already holds the first window (new1–new3); the next page is
+	// the two most recently received of the rest: old3 (uid 6), old2 (uid 5).
+	loaded := map[uint32]bool{1: true, 2: true, 3: true}
+	got, err := cli.FetchMoreHeaders(context.Background(), "INBOX", 2, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []uint32{6, 5}
+	if fmt.Sprint(uidsOf(got)) != fmt.Sprint(want) {
+		t.Errorf("uids = %v, want %v", uidsOf(got), want)
+	}
+	// Everything loaded → nothing more, no error.
+	for _, e := range got {
+		loaded[e.UID] = true
+	}
+	loaded[4] = true
+	rest, err := cli.FetchMoreHeaders(context.Background(), "INBOX", 2, loaded)
+	if err != nil || len(rest) != 0 {
+		t.Errorf("after all loaded: %v, %v; want empty", uidsOf(rest), err)
+	}
+}
