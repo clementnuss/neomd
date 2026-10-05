@@ -431,14 +431,18 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 			return nil
 		}
 
-		// Take the last n UIDs (most recent) and reverse to newest-first.
-		// n=0 means no limit — fetch all.
+		// Window: the n most recently received messages, newest first.
+		// n=0 means no limit — fetch all (UID-descending, no extra round trip).
 		sort.Slice(allUIDs, func(i, j int) bool { return allUIDs[i] < allUIDs[j] })
 		if n > 0 && len(allUIDs) > n {
-			allUIDs = allUIDs[len(allUIDs)-n:]
-		}
-		for i, j := 0, len(allUIDs)-1; i < j; i, j = i+1, j-1 {
-			allUIDs[i], allUIDs[j] = allUIDs[j], allUIDs[i]
+			allUIDs, err = newestUIDsByInternalDate(conn, allUIDs, n)
+			if err != nil {
+				return err
+			}
+		} else {
+			for i, j := 0, len(allUIDs)-1; i < j; i, j = i+1, j-1 {
+				allUIDs[i], allUIDs[j] = allUIDs[j], allUIDs[i]
+			}
 		}
 
 		var fetchSet imap.UIDSet
@@ -530,6 +534,47 @@ func (c *Client) FetchHeaders(ctx context.Context, folder string, n int) ([]Emai
 		return nil
 	})
 	return emails, err
+}
+
+// newestUIDsByInternalDate narrows uids (in the selected mailbox) to the n most
+// recently received, newest first, by INTERNALDATE (ties broken by UID).
+//
+// "Highest n UIDs" is not "newest n": MOVE/COPY give a message a fresh,
+// highest UID in the destination mailbox (RFC 9051 per-mailbox UIDs), so mail
+// bulk-moved back into a folder — screener approve, `:reset-toscreen`, undo —
+// fills a UID-selected window and pushes recent mail below the cutoff
+// (issue #34). INTERNALDATE survives MOVE/COPY on every server tested.
+// One cheap FETCH (UID INTERNALDATE) for all uids; the SORT extension is not
+// used because Infomaniak and others do not offer it.
+func newestUIDsByInternalDate(conn *imapclient.Client, uids []imap.UID, n int) ([]imap.UID, error) {
+	var set imap.UIDSet
+	set.AddNum(uids...)
+	msgs, err := conn.Fetch(set, &imap.FetchOptions{UID: true, InternalDate: true}).Collect()
+	if err != nil {
+		return nil, fmt.Errorf("FETCH INTERNALDATE: %w", err)
+	}
+	type arrival struct {
+		uid imap.UID
+		t   time.Time
+	}
+	arr := make([]arrival, 0, len(msgs))
+	for _, m := range msgs {
+		arr = append(arr, arrival{m.UID, m.InternalDate})
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		if !arr[i].t.Equal(arr[j].t) {
+			return arr[i].t.After(arr[j].t)
+		}
+		return arr[i].uid > arr[j].uid
+	})
+	if len(arr) > n {
+		arr = arr[:n]
+	}
+	out := make([]imap.UID, len(arr))
+	for i, a := range arr {
+		out[i] = a.uid
+	}
+	return out, nil
 }
 
 // SearchUIDs returns all UIDs in folder without fetching any headers.
@@ -642,8 +687,11 @@ func (c *Client) SearchMessages(ctx context.Context, folder, query string) ([]Em
 	return c.searchFolder(ctx, folder, buildSearchCriteria(query))
 }
 
+// searchFolderCap bounds the headers fetched per folder by searchFolder.
+var searchFolderCap = 100
+
 // searchFolder runs UID SEARCH with criteria in folder and fetches the
-// newest 100 matching headers.
+// newest searchFolderCap matching headers.
 func (c *Client) searchFolder(ctx context.Context, folder string, criteria *imap.SearchCriteria) ([]Email, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -667,6 +715,14 @@ func (c *Client) searchFolder(ctx context.Context, folder string, criteria *imap
 			return nil
 		}
 		nums, _ := uidSet.Nums()
+		// Cap results per folder to avoid huge fetches: keep the most
+		// recently received matches (INTERNALDATE, not highest UID).
+		if len(nums) > searchFolderCap {
+			nums, err = newestUIDsByInternalDate(conn, nums, searchFolderCap)
+			if err != nil {
+				return err
+			}
+		}
 		for _, u := range nums {
 			uids = append(uids, uint32(u))
 		}
@@ -677,11 +733,6 @@ func (c *Client) searchFolder(ctx context.Context, folder string, criteria *imap
 	}
 	if len(uids) == 0 {
 		return nil, nil
-	}
-
-	// Cap results per folder to avoid huge fetches
-	if len(uids) > 100 {
-		uids = uids[len(uids)-100:] // keep newest (highest UIDs)
 	}
 
 	return c.FetchHeadersByUID(ctx, folder, uids)
@@ -875,21 +926,13 @@ func buildSearchCriteria(query string) *imap.SearchCriteria {
 	}
 }
 
-// FetchLatest fetches the N most recent emails (by UID, descending) from a folder.
-// Uses UID SEARCH ALL to get all UIDs, takes the last N, and fetches headers.
+// FetchLatest fetches the n most recently received emails from a folder,
+// newest first — the same INTERNALDATE window as FetchHeaders (n must be > 0).
 func (c *Client) FetchLatest(ctx context.Context, folder string, n int) ([]Email, error) {
-	uids, err := c.SearchUIDs(ctx, folder)
-	if err != nil {
-		return nil, err
-	}
-	if len(uids) == 0 {
+	if n <= 0 {
 		return nil, nil
 	}
-	// UIDs are ascending; take the last N (newest)
-	if len(uids) > n {
-		uids = uids[len(uids)-n:]
-	}
-	return c.FetchHeadersByUID(ctx, folder, uids)
+	return c.FetchHeaders(ctx, folder, n)
 }
 
 // FetchLatestAllFolders fetches the N most recent emails across all given folders,
